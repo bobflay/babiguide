@@ -13,12 +13,18 @@ class SearchScreen extends StatefulWidget {
   final VoidCallback? onBack;
   final bool showFilterSheet;
   final ValueChanged<String>? onOpenRestaurant;
+  final String? initialQuery;
+  final String? initialNeighborhoodId;
+  final int? initialSortIndex;
 
   const SearchScreen({
     super.key,
     this.onBack,
     this.showFilterSheet = false,
     this.onOpenRestaurant,
+    this.initialQuery,
+    this.initialNeighborhoodId,
+    this.initialSortIndex,
   });
 
   @override
@@ -74,11 +80,17 @@ class _SearchScreenState extends State<SearchScreen> {
   Timer? _debounce;
   Future<PagedList<Place>>? _resultsFuture;
   Future<List<SearchSuggestion>>? _suggestionsFuture;
-  _Filters _filters = const _Filters();
+  late _Filters _filters = _Filters(
+    sortIndex: (widget.initialSortIndex ?? 0).clamp(0, sortKeys.length - 1),
+  );
 
   @override
   void initState() {
     super.initState();
+    if (widget.initialQuery != null && widget.initialQuery!.isNotEmpty) {
+      _q.text = widget.initialQuery!;
+      _q.selection = TextSelection.collapsed(offset: _q.text.length);
+    }
     WidgetsBinding.instance.addPostFrameCallback((_) {
       _runSearch();
     });
@@ -115,6 +127,7 @@ class _SearchScreenState extends State<SearchScreen> {
         price: priceList.map((i) => '$i').toList(),
         cuisines: f.cuisines.toList(),
         amenities: f.amenities.toList(),
+        neighborhood: widget.initialNeighborhoodId,
       );
     });
   }

@@ -15,6 +15,7 @@ class DetailScreen extends StatefulWidget {
   final VoidCallback? onBack;
   final VoidCallback? onWriteReview;
   final VoidCallback? onOpenMedia;
+  final ValueChanged<int>? onOpenMediaAt;
   final ValueChanged<DetailPlace>? onLoaded;
   final VoidCallback? onRequireAuthForFavorite;
 
@@ -24,6 +25,7 @@ class DetailScreen extends StatefulWidget {
     this.onBack,
     this.onWriteReview,
     this.onOpenMedia,
+    this.onOpenMediaAt,
     this.onLoaded,
     this.onRequireAuthForFavorite,
   });
@@ -134,6 +136,7 @@ class _DetailScreenState extends State<DetailScreen> {
             onBack: widget.onBack,
             onWriteReview: widget.onWriteReview,
             onOpenMedia: widget.onOpenMedia,
+            onOpenMediaAt: widget.onOpenMediaAt,
             onToggleFavorite: () => _toggleFavorite(bundle.place),
             onShare: () => _share(bundle.place),
             onDirections: () => _openDirections(bundle.place),
@@ -344,6 +347,7 @@ class _DetailBody extends StatelessWidget {
   final VoidCallback? onBack;
   final VoidCallback? onWriteReview;
   final VoidCallback? onOpenMedia;
+  final ValueChanged<int>? onOpenMediaAt;
   final VoidCallback? onToggleFavorite;
   final VoidCallback? onShare;
   final VoidCallback? onDirections;
@@ -361,6 +365,7 @@ class _DetailBody extends StatelessWidget {
     required this.onBack,
     required this.onWriteReview,
     required this.onOpenMedia,
+    required this.onOpenMediaAt,
     required this.onToggleFavorite,
     required this.onShare,
     required this.onDirections,
@@ -508,8 +513,13 @@ class _DetailBody extends StatelessWidget {
                 mainAxisSpacing: 6,
                 shrinkWrap: true,
                 physics: const NeverScrollableScrollPhysics(),
-                children:
-                    gallery.map((g) => _GalleryTile(item: g)).toList(),
+                children: [
+                  for (var i = 0; i < gallery.length; i++)
+                    _GalleryTile(
+                      item: gallery[i],
+                      onTap: () => onOpenMediaAt?.call(i),
+                    ),
+                ],
               ),
             ],
           ),
@@ -539,7 +549,12 @@ class _DetailBody extends StatelessWidget {
           children: [
             _Title(text: l.facts),
             const SizedBox(height: 10),
-            _FactsCard(place: place, l: l),
+            _FactsCard(
+              place: place,
+              l: l,
+              onTapAddress: onDirections,
+              onTapPhone: onCall,
+            ),
           ],
         ),
       ),
@@ -616,7 +631,13 @@ class _DetailBody extends StatelessWidget {
               mainAxisSpacing: 6,
               shrinkWrap: true,
               physics: const NeverScrollableScrollPhysics(),
-              children: items.map((g) => _GalleryTile(item: g)).toList(),
+              children: [
+                for (var i = 0; i < items.length; i++)
+                  _GalleryTile(
+                    item: items[i],
+                    onTap: () => onOpenMediaAt?.call(i),
+                  ),
+              ],
             ),
           ],
         ),
@@ -1321,10 +1342,13 @@ class _SubRow extends StatelessWidget {
 
 class _GalleryTile extends StatelessWidget {
   final GalleryItem item;
-  const _GalleryTile({required this.item});
+  final VoidCallback? onTap;
+  const _GalleryTile({required this.item, this.onTap});
   @override
   Widget build(BuildContext context) {
-    return ClipRRect(
+    return GestureDetector(
+      onTap: onTap,
+      child: ClipRRect(
       borderRadius: BorderRadius.circular(12),
       child: AspectRatio(
         aspectRatio: 1,
@@ -1379,6 +1403,7 @@ class _GalleryTile extends StatelessWidget {
           ],
         ),
       ),
+    ),
     );
   }
 }
@@ -1607,7 +1632,14 @@ class _MenuItem extends StatelessWidget {
 class _FactsCard extends StatelessWidget {
   final DetailPlace place;
   final L l;
-  const _FactsCard({required this.place, required this.l});
+  final VoidCallback? onTapAddress;
+  final VoidCallback? onTapPhone;
+  const _FactsCard({
+    required this.place,
+    required this.l,
+    this.onTapAddress,
+    this.onTapPhone,
+  });
 
   String _hoursSummary() {
     if (place.weeklyHours.isEmpty) return '';
@@ -1636,11 +1668,23 @@ class _FactsCard extends StatelessWidget {
   Widget build(BuildContext context) {
     final p = AppScope.of(context).palette;
     final hoursText = _hoursSummary();
-    final items = <List<Object>>[
-      if ((place.address ?? '').isNotEmpty)
-        [Icons.location_on_outlined, place.address!],
-      if (hoursText.isNotEmpty) [Icons.access_time, hoursText],
-      if ((place.phone ?? '').isNotEmpty) [Icons.phone, place.phone!],
+    final hasAddress = (place.address ?? '').isNotEmpty;
+    final hasPhone = (place.phone ?? '').isNotEmpty;
+    final items = <_FactRow>[
+      if (hasAddress)
+        _FactRow(
+          icon: Icons.location_on_outlined,
+          text: place.address!,
+          onTap: place.lat != null && place.lng != null ? onTapAddress : null,
+        ),
+      if (hoursText.isNotEmpty)
+        _FactRow(icon: Icons.access_time, text: hoursText),
+      if (hasPhone)
+        _FactRow(
+          icon: Icons.phone,
+          text: place.phone!,
+          onTap: onTapPhone,
+        ),
     ];
     if (items.isEmpty) {
       return Container(
@@ -1667,44 +1711,58 @@ class _FactsCard extends StatelessWidget {
       child: Column(
         children: [
           for (var i = 0; i < items.length; i++)
-            Container(
-              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 12),
-              decoration: BoxDecoration(
-                border: Border(
-                  bottom: BorderSide(
-                    color: i < items.length - 1
-                        ? p.cardBorder
-                        : Colors.transparent,
+            GestureDetector(
+              onTap: items[i].onTap,
+              behavior: HitTestBehavior.opaque,
+              child: Container(
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 12, vertical: 12),
+                decoration: BoxDecoration(
+                  border: Border(
+                    bottom: BorderSide(
+                      color: i < items.length - 1
+                          ? p.cardBorder
+                          : Colors.transparent,
+                    ),
                   ),
                 ),
-              ),
-              child: Row(
-                children: [
-                  Container(
-                    width: 32,
-                    height: 32,
-                    decoration: BoxDecoration(
-                      color: p.orange.withValues(alpha: 0.10),
-                      borderRadius: BorderRadius.circular(9),
+                child: Row(
+                  children: [
+                    Container(
+                      width: 32,
+                      height: 32,
+                      decoration: BoxDecoration(
+                        color: p.orange.withValues(alpha: 0.10),
+                        borderRadius: BorderRadius.circular(9),
+                      ),
+                      child: Icon(items[i].icon,
+                          size: 15, color: p.orangeDeep),
                     ),
-                    child: Icon(items[i][0] as IconData,
-                        size: 15, color: p.orangeDeep),
-                  ),
-                  const SizedBox(width: 12),
-                  Expanded(
-                    child: Text(
-                      items[i][1] as String,
-                      style: BgFonts.body(size: 13, color: p.ink),
+                    const SizedBox(width: 12),
+                    Expanded(
+                      child: Text(
+                        items[i].text,
+                        style: BgFonts.body(size: 13, color: p.ink),
+                      ),
                     ),
-                  ),
-                  Icon(Icons.chevron_right, size: 16, color: p.inkMuted),
-                ],
+                    if (items[i].onTap != null)
+                      Icon(Icons.chevron_right,
+                          size: 16, color: p.inkMuted),
+                  ],
+                ),
               ),
             ),
         ],
       ),
     );
   }
+}
+
+class _FactRow {
+  final IconData icon;
+  final String text;
+  final VoidCallback? onTap;
+  const _FactRow({required this.icon, required this.text, this.onTap});
 }
 
 class _ReviewCard extends StatefulWidget {

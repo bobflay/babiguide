@@ -11,8 +11,20 @@ import '../widgets/star_row.dart';
 class HomeScreen extends StatefulWidget {
   final ValueChanged<String>? onOpenRestaurant;
   final VoidCallback? onOpenSearch;
+  final ValueChanged<Neighborhood>? onOpenNeighborhood;
+  final VoidCallback? onSeeAllTrending;
+  final VoidCallback? onSeeAllNew;
+  final VoidCallback? onSeeAllNeighborhoods;
 
-  const HomeScreen({super.key, this.onOpenRestaurant, this.onOpenSearch});
+  const HomeScreen({
+    super.key,
+    this.onOpenRestaurant,
+    this.onOpenSearch,
+    this.onOpenNeighborhood,
+    this.onSeeAllTrending,
+    this.onSeeAllNew,
+    this.onSeeAllNeighborhoods,
+  });
 
   @override
   State<HomeScreen> createState() => _HomeScreenState();
@@ -71,6 +83,10 @@ class _HomeScreenState extends State<HomeScreen> {
             userName: state.user?.name,
             onOpenRestaurant: widget.onOpenRestaurant,
             onOpenSearch: widget.onOpenSearch,
+            onOpenNeighborhood: widget.onOpenNeighborhood,
+            onSeeAllTrending: widget.onSeeAllTrending,
+            onSeeAllNew: widget.onSeeAllNew,
+            onSeeAllNeighborhoods: widget.onSeeAllNeighborhoods,
           );
         },
       ),
@@ -162,6 +178,10 @@ class _HomeBody extends StatelessWidget {
   final String? userName;
   final ValueChanged<String>? onOpenRestaurant;
   final VoidCallback? onOpenSearch;
+  final ValueChanged<Neighborhood>? onOpenNeighborhood;
+  final VoidCallback? onSeeAllTrending;
+  final VoidCallback? onSeeAllNew;
+  final VoidCallback? onSeeAllNeighborhoods;
 
   const _HomeBody({
     required this.feed,
@@ -170,6 +190,10 @@ class _HomeBody extends StatelessWidget {
     required this.userName,
     required this.onOpenRestaurant,
     required this.onOpenSearch,
+    required this.onOpenNeighborhood,
+    required this.onSeeAllTrending,
+    required this.onSeeAllNew,
+    required this.onSeeAllNeighborhoods,
   });
 
   @override
@@ -184,9 +208,12 @@ class _HomeBody extends StatelessWidget {
           userName: userName,
         ),
         _SearchBar(p: p, l: l, onTap: onOpenSearch),
-        _QuickFilters(p: p, l: l),
-        const SizedBox(height: 14),
-        _SectionHeader(title: l.sectionTrending, action: l.seeAll),
+        const SizedBox(height: 18),
+        _SectionHeader(
+          title: l.sectionTrending,
+          action: l.seeAll,
+          onTap: onSeeAllTrending,
+        ),
         SizedBox(
           height: 308,
           child: ListView(
@@ -204,8 +231,12 @@ class _HomeBody extends StatelessWidget {
           ),
         ),
         const SizedBox(height: 24),
-        _SectionHeader(title: l.sectionNew, action: l.seeAll),
-        for (final n in feed.newPlaces) ...[
+        _SectionHeader(
+          title: l.sectionNew,
+          action: l.seeAll,
+          onTap: onSeeAllNew,
+        ),
+        for (final n in feed.newPlaces.take(5)) ...[
           Padding(
             padding: const EdgeInsets.symmetric(horizontal: 20),
             child: _NewRow(p: n, l: l, onTap: () => onOpenRestaurant?.call(n.id)),
@@ -213,7 +244,11 @@ class _HomeBody extends StatelessWidget {
           const SizedBox(height: 8),
         ],
         const SizedBox(height: 16),
-        _SectionHeader(title: l.sectionNeighborhoods, action: l.seeAll),
+        _SectionHeader(
+          title: l.sectionNeighborhoods,
+          action: l.seeAll,
+          onTap: onSeeAllNeighborhoods,
+        ),
         SizedBox(
           height: 132,
           child: ListView(
@@ -221,7 +256,10 @@ class _HomeBody extends StatelessWidget {
             padding: const EdgeInsets.symmetric(horizontal: 20),
             children: [
               for (final n in feed.neighborhoods) ...[
-                _NeighborhoodPill(n: n, l: l),
+                GestureDetector(
+                  onTap: () => onOpenNeighborhood?.call(n),
+                  child: _NeighborhoodPill(n: n, l: l),
+                ),
                 const SizedBox(width: 10),
               ],
             ],
@@ -350,72 +388,15 @@ class _SearchBar extends StatelessWidget {
   }
 }
 
-class _QuickFilters extends StatelessWidget {
-  final BgPalette p;
-  final L l;
-  const _QuickFilters({required this.p, required this.l});
-
-  @override
-  Widget build(BuildContext context) {
-    final items = [
-      [l.nearMe, Icons.location_on_outlined, true],
-      [l.topRated, Icons.star_outline, false],
-      [l.openNow, Icons.access_time, false],
-      ['₣', null, false],
-      ['₣₣', null, false],
-      ['₣₣₣', null, false],
-    ];
-
-    return SizedBox(
-      height: 46,
-      child: ListView.separated(
-        scrollDirection: Axis.horizontal,
-        padding: const EdgeInsets.fromLTRB(20, 14, 20, 4),
-        itemCount: items.length,
-        separatorBuilder: (_, _) => const SizedBox(width: 8),
-        itemBuilder: (_, i) {
-          final f = items[i];
-          final selected = f[2] as bool;
-          return Container(
-            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
-            decoration: BoxDecoration(
-              color: selected ? p.ink : p.card,
-              borderRadius: BorderRadius.circular(999),
-              border: selected ? null : Border.all(color: p.cardBorder),
-            ),
-            child: Row(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                if (f[1] != null) ...[
-                  Icon(
-                    f[1] as IconData,
-                    size: 13,
-                    color: selected ? p.bg : p.ink,
-                  ),
-                  const SizedBox(width: 6),
-                ],
-                Text(
-                  f[0] as String,
-                  style: BgFonts.body(
-                    size: 13,
-                    weight: FontWeight.w600,
-                    color: selected ? p.bg : p.ink,
-                    height: 1.0,
-                  ),
-                ),
-              ],
-            ),
-          );
-        },
-      ),
-    );
-  }
-}
-
 class _SectionHeader extends StatelessWidget {
   final String title;
   final String action;
-  const _SectionHeader({required this.title, required this.action});
+  final VoidCallback? onTap;
+  const _SectionHeader({
+    required this.title,
+    required this.action,
+    this.onTap,
+  });
 
   @override
   Widget build(BuildContext context) {
@@ -438,12 +419,19 @@ class _SectionHeader extends StatelessWidget {
             ),
           ),
           const SizedBox(width: 12),
-          Text(
-            action,
-            style: BgFonts.body(
-              size: 12,
-              weight: FontWeight.w600,
-              color: p.orangeDeep,
+          GestureDetector(
+            onTap: onTap,
+            behavior: HitTestBehavior.opaque,
+            child: Padding(
+              padding: const EdgeInsets.symmetric(vertical: 6, horizontal: 4),
+              child: Text(
+                action,
+                style: BgFonts.body(
+                  size: 12,
+                  weight: FontWeight.w600,
+                  color: p.orangeDeep,
+                ),
+              ),
             ),
           ),
         ],

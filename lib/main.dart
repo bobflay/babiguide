@@ -93,8 +93,38 @@ class _RootState extends State<_Root> {
   DetailPlace? _detailPlace;
   _Route? _authReturnRoute;
   VoidCallback? _pendingAuthAction;
+  String? _searchInitialQuery;
+  String? _searchInitialNeighborhoodId;
+  int? _searchInitialSortIndex;
+  int _mediaInitialIndex = 0;
+  bool _mediaOpenLightbox = false;
 
   void _go(_Route r) => setState(() => _route = r);
+
+  void _openSearch({
+    String? query,
+    String? neighborhoodId,
+    int? sortIndex,
+  }) {
+    setState(() {
+      _searchInitialQuery = query;
+      _searchInitialNeighborhoodId = neighborhoodId;
+      _searchInitialSortIndex = sortIndex;
+      _route = _Route.search;
+    });
+  }
+
+  void _openNeighborhood(Neighborhood n) {
+    _openSearch(query: n.name, neighborhoodId: n.id);
+  }
+
+  void _openMediaAt(int index, {bool lightbox = false}) {
+    setState(() {
+      _mediaInitialIndex = index;
+      _mediaOpenLightbox = lightbox;
+      _route = _Route.media;
+    });
+  }
 
   void _openDetail(String slug) {
     setState(() {
@@ -236,18 +266,28 @@ class _RootState extends State<_Root> {
       case _Route.home:
         return HomeScreen(
           onOpenRestaurant: _openDetail,
-          onOpenSearch: () => _go(_Route.search),
+          onOpenSearch: () => _openSearch(),
+          onOpenNeighborhood: _openNeighborhood,
+          onSeeAllTrending: () => _openSearch(sortIndex: 1),
+          onSeeAllNew: () => _openSearch(sortIndex: 3),
+          onSeeAllNeighborhoods: () => _openSearch(),
         );
       case _Route.search:
         return SearchScreen(
           onBack: () => _go(_Route.home),
           onOpenRestaurant: _openDetail,
+          initialQuery: _searchInitialQuery,
+          initialNeighborhoodId: _searchInitialNeighborhoodId,
+          initialSortIndex: _searchInitialSortIndex,
         );
       case _Route.searchFilter:
         return SearchScreen(
           onBack: () => _go(_Route.home),
           showFilterSheet: true,
           onOpenRestaurant: _openDetail,
+          initialQuery: _searchInitialQuery,
+          initialNeighborhoodId: _searchInitialNeighborhoodId,
+          initialSortIndex: _searchInitialSortIndex,
         );
       case _Route.map:
         return MapScreen(
@@ -267,7 +307,8 @@ class _RootState extends State<_Root> {
           onBack: () => _go(_Route.home),
           onWriteReview: () =>
               _requireAuth(onSuccess: () => _go(_Route.review)),
-          onOpenMedia: () => _go(_Route.media),
+          onOpenMedia: () => _openMediaAt(0, lightbox: false),
+          onOpenMediaAt: (i) => _openMediaAt(i, lightbox: true),
           onLoaded: (place) => _detailPlace = place,
           onRequireAuthForFavorite: () => _requireAuth(
             onSuccess: () async {
@@ -292,6 +333,8 @@ class _RootState extends State<_Root> {
           slug: _detailSlug,
           placeName: _detailPlace?.name,
           onBack: () => _go(_Route.detail),
+          initialIndex: _mediaInitialIndex,
+          initialLightbox: _mediaOpenLightbox,
         );
       case _Route.mediaLightbox:
         return MediaScreen(

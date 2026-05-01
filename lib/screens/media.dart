@@ -21,6 +21,7 @@ class MediaScreen extends StatefulWidget {
   final String? placeName;
   final VoidCallback? onBack;
   final bool initialLightbox;
+  final int initialIndex;
 
   const MediaScreen({
     super.key,
@@ -28,6 +29,7 @@ class MediaScreen extends StatefulWidget {
     this.placeName,
     this.onBack,
     this.initialLightbox = false,
+    this.initialIndex = 0,
   });
 
   @override
@@ -44,7 +46,7 @@ class _MediaScreenState extends State<MediaScreen> {
   @override
   void initState() {
     super.initState();
-    if (widget.initialLightbox) _open = 0;
+    if (widget.initialLightbox) _open = widget.initialIndex;
     WidgetsBinding.instance.addPostFrameCallback((_) {
       _load();
     });
