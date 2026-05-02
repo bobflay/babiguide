@@ -1,8 +1,14 @@
+import 'dart:async';
 import 'dart:io';
+import 'dart:ui' as ui;
 
+import 'package:camera/camera.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart';
 import 'package:flutter/services.dart';
 import 'package:image_picker/image_picker.dart';
+import 'package:video_player/video_player.dart';
 
 import '../api/api_error.dart';
 import '../api/media_api.dart';
@@ -48,21 +54,17 @@ const List<int> _kDurations = [15, 30, 60];
 
 class _UploadFlowState extends State<UploadFlow> {
   int _step = 0;
-  // 0 = Photo, 1 = Video. Live (idx 2) is rendered but disabled (no support).
-  int _modeIdx = 1;
-  int _durationIdx = 1;
-  bool _recording = false;
-  int _filterIdx = 1;
   int _audienceIdx = 0;
   final Map<int, int> _stars = {0: 5, 1: 4, 2: 4, 3: 5};
   final Set<int> _selectedHashtags = {0, 1};
   bool _allowComments = true;
   bool _allowDuet = true;
   bool _publishing = false;
-  XFile? _picked;
+  XFile? _picked; // The originally captured/picked file.
+  XFile? _edited; // The post-edit file we'll upload (baked photo or
+  //                same as _picked for video).
   String _kind = 'photo';
   final TextEditingController _captionCtl = TextEditingController();
-  final ImagePicker _picker = ImagePicker();
 
   @override
   void dispose() {
@@ -70,68 +72,22 @@ class _UploadFlowState extends State<UploadFlow> {
     super.dispose();
   }
 
-  Future<void> _pickFromCamera() async {
-    final l = L(AppScope.of(context).lang);
-    try {
-      XFile? picked;
-      if (_modeIdx == 0) {
-        _kind = 'photo';
-        picked = await _picker.pickImage(
-          source: ImageSource.camera,
-          imageQuality: 85,
-          maxWidth: 2048,
-        );
-      } else if (_modeIdx == 1) {
-        _kind = 'video';
-        picked = await _picker.pickVideo(
-          source: ImageSource.camera,
-          maxDuration: Duration(seconds: _kDurations[_durationIdx]),
-        );
-      } else {
-        // Live mode is not supported.
-        return;
-      }
-      if (picked == null || !mounted) return;
-      setState(() {
-        _picked = picked;
-        _step = 1;
-      });
-    } catch (_) {
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-        content: Text(l.photoUploadFailed),
-        behavior: SnackBarBehavior.floating,
-      ));
-    }
+  void _onCaptured(XFile file, String kind) {
+    if (!mounted) return;
+    setState(() {
+      _picked = file;
+      _edited = file;
+      _kind = kind;
+      _step = 1;
+    });
   }
 
-  Future<void> _pickFromLibrary() async {
-    final l = L(AppScope.of(context).lang);
-    try {
-      XFile? picked;
-      if (_modeIdx == 1) {
-        _kind = 'video';
-        picked = await _picker.pickVideo(source: ImageSource.gallery);
-      } else {
-        _kind = 'photo';
-        picked = await _picker.pickImage(
-          source: ImageSource.gallery,
-          imageQuality: 85,
-          maxWidth: 2048,
-        );
-      }
-      if (picked == null || !mounted) return;
-      setState(() {
-        _picked = picked;
-        _step = 1;
-      });
-    } catch (_) {
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-        content: Text(l.photoUploadFailed),
-        behavior: SnackBarBehavior.floating,
-      ));
-    }
+  void _onEditDone(XFile editedFile) {
+    if (!mounted) return;
+    setState(() {
+      _edited = editedFile;
+      _step = 2;
+    });
   }
 
   Future<void> _publish() async {
@@ -197,32 +153,21 @@ class _UploadFlowState extends State<UploadFlow> {
       canPop: !_publishing,
       child: switch (_step) {
         0 => _CaptureStep(
-            modeIdx: _modeIdx,
-            durationIdx: _durationIdx,
-            recording: _recording,
             placeName: widget.placeName,
             placeNeighborhood: widget.placeNeighborhood,
             placePhotoUrl: widget.placePhotoUrl,
-            canProceed: _picked != null,
-            onModeChanged: (i) => setState(() => _modeIdx = i),
-            onDurationChanged: (i) => setState(() => _durationIdx = i),
-            onRecordingChanged: (v) => setState(() => _recording = v),
             onCancel: () => Navigator.of(context).maybePop(),
-            onLibrary: _pickFromLibrary,
-            onCapture: _pickFromCamera,
-            onNext: () => setState(() => _step = 1),
+            onCaptured: _onCaptured,
           ),
         1 => _EditStep(
             picked: _picked,
             kind: _kind,
-            filterIdx: _filterIdx,
-            onFilterChanged: (i) => setState(() => _filterIdx = i),
             onBack: () => setState(() => _step = 0),
-            onNext: () => setState(() => _step = 2),
+            onDone: _onEditDone,
           ),
         _ => _PublishStep(
             captionCtl: _captionCtl,
-            picked: _picked,
+            picked: _edited ?? _picked,
             kind: _kind,
             placeName: widget.placeName,
             placeNeighborhood: widget.placeNeighborhood,
@@ -260,38 +205,287 @@ class _UploadFlowState extends State<UploadFlow> {
 // Step 1 — Capture
 // ─────────────────────────────────────────────
 
-class _CaptureStep extends StatelessWidget {
-  final int modeIdx;
-  final int durationIdx;
-  final bool recording;
+class _CaptureStep extends StatefulWidget {
   final String? placeName;
   final String? placeNeighborhood;
   final String? placePhotoUrl;
-  final bool canProceed;
-  final ValueChanged<int> onModeChanged;
-  final ValueChanged<int> onDurationChanged;
-  final ValueChanged<bool> onRecordingChanged;
   final VoidCallback onCancel;
-  final VoidCallback onLibrary;
-  final VoidCallback onCapture;
-  final VoidCallback onNext;
+  final void Function(XFile file, String kind) onCaptured;
 
   const _CaptureStep({
-    required this.modeIdx,
-    required this.durationIdx,
-    required this.recording,
     required this.placeName,
     required this.placeNeighborhood,
     required this.placePhotoUrl,
-    required this.canProceed,
-    required this.onModeChanged,
-    required this.onDurationChanged,
-    required this.onRecordingChanged,
     required this.onCancel,
-    required this.onLibrary,
-    required this.onCapture,
-    required this.onNext,
+    required this.onCaptured,
   });
+
+  @override
+  State<_CaptureStep> createState() => _CaptureStepState();
+}
+
+class _CaptureStepState extends State<_CaptureStep>
+    with WidgetsBindingObserver {
+  CameraController? _controller;
+  List<CameraDescription>? _cameras;
+  int _cameraIdx = 0;
+  FlashMode _flashMode = FlashMode.off;
+  bool _gridOn = true;
+  // 0 = Photo, 1 = Video. Live (idx 2) is rendered but disabled.
+  int _modeIdx = 1;
+  int _durationIdx = 1;
+  bool _initializing = true;
+  String? _error;
+  bool _isRecording = false;
+  bool _capturingPhoto = false;
+  Timer? _recordTimer;
+  Duration _recordElapsed = Duration.zero;
+  final ImagePicker _picker = ImagePicker();
+
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addObserver(this);
+    // Camera plugin doesn't run in widget tests / on web — skip silently
+    // there so flutter test still passes.
+    if (!kIsWeb) {
+      _initCamera();
+    } else {
+      _initializing = false;
+      _error = 'unsupported_platform';
+    }
+  }
+
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    _recordTimer?.cancel();
+    _controller?.dispose();
+    super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    final c = _controller;
+    if (c == null || !c.value.isInitialized) return;
+    if (state == AppLifecycleState.inactive ||
+        state == AppLifecycleState.paused) {
+      // Stop any in-flight recording so the file isn't truncated.
+      if (_isRecording) {
+        _stopRecording();
+      }
+      c.dispose();
+      _controller = null;
+    } else if (state == AppLifecycleState.resumed) {
+      _initCamera();
+    }
+  }
+
+  Future<void> _initCamera() async {
+    if (!mounted) return;
+    setState(() {
+      _initializing = true;
+      _error = null;
+    });
+    try {
+      final cams = _cameras ?? await availableCameras();
+      _cameras = cams;
+      if (cams.isEmpty) {
+        if (!mounted) return;
+        setState(() {
+          _error = 'no_camera';
+          _initializing = false;
+        });
+        return;
+      }
+      // Prefer back-facing on first init.
+      if (_controller == null && _cameraIdx == 0) {
+        final backIdx =
+            cams.indexWhere((c) => c.lensDirection == CameraLensDirection.back);
+        if (backIdx >= 0) _cameraIdx = backIdx;
+      }
+      final controller = CameraController(
+        cams[_cameraIdx.clamp(0, cams.length - 1)],
+        ResolutionPreset.high,
+        enableAudio: true,
+        imageFormatGroup: ImageFormatGroup.jpeg,
+      );
+      await controller.initialize();
+      try {
+        await controller.setFlashMode(_flashMode);
+      } catch (_) {
+        // Some devices/lenses don't support all flash modes; ignore.
+      }
+      if (!mounted) {
+        await controller.dispose();
+        return;
+      }
+      setState(() {
+        _controller = controller;
+        _initializing = false;
+        _error = null;
+      });
+    } on CameraException catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _error = e.code;
+        _initializing = false;
+      });
+    } catch (_) {
+      if (!mounted) return;
+      setState(() {
+        _error = 'unknown';
+        _initializing = false;
+      });
+    }
+  }
+
+  Future<void> _flipCamera() async {
+    final cams = _cameras;
+    if (cams == null || cams.length < 2 || _isRecording) return;
+    final old = _controller;
+    setState(() {
+      _controller = null;
+      _initializing = true;
+      _cameraIdx = (_cameraIdx + 1) % cams.length;
+    });
+    await old?.dispose();
+    await _initCamera();
+  }
+
+  Future<void> _cycleFlash() async {
+    final c = _controller;
+    if (c == null || !c.value.isInitialized) return;
+    final next = switch (_flashMode) {
+      FlashMode.off => FlashMode.auto,
+      FlashMode.auto => FlashMode.always,
+      _ => FlashMode.off,
+    };
+    try {
+      await c.setFlashMode(next);
+      if (mounted) setState(() => _flashMode = next);
+    } on CameraException {
+      // Lens doesn't support this mode; ignore.
+    }
+  }
+
+  Future<void> _onRecordTap() async {
+    final c = _controller;
+    if (c == null || !c.value.isInitialized) return;
+    if (_modeIdx == 0) {
+      // Photo mode — take a still.
+      if (_capturingPhoto || _isRecording) return;
+      setState(() => _capturingPhoto = true);
+      try {
+        final file = await c.takePicture();
+        if (!mounted) return;
+        widget.onCaptured(file, 'photo');
+      } on CameraException catch (e) {
+        _showError(e.description ?? e.code);
+      } finally {
+        if (mounted) setState(() => _capturingPhoto = false);
+      }
+    } else if (_modeIdx == 1) {
+      // Video mode — toggle recording.
+      if (!_isRecording) {
+        await _startRecording();
+      } else {
+        await _stopRecording();
+      }
+    }
+    // _modeIdx == 2 (Live) — disabled, no-op.
+  }
+
+  Future<void> _startRecording() async {
+    final c = _controller;
+    if (c == null || !c.value.isInitialized || _isRecording) return;
+    try {
+      await c.startVideoRecording();
+      _recordElapsed = Duration.zero;
+      _recordTimer =
+          Timer.periodic(const Duration(milliseconds: 100), (_) {
+        if (!mounted) return;
+        setState(() {
+          _recordElapsed += const Duration(milliseconds: 100);
+        });
+        if (_recordElapsed.inSeconds >= _kDurations[_durationIdx]) {
+          _stopRecording();
+        }
+      });
+      setState(() => _isRecording = true);
+    } on CameraException catch (e) {
+      _showError(e.description ?? e.code);
+    }
+  }
+
+  Future<void> _stopRecording() async {
+    final c = _controller;
+    if (c == null) return;
+    _recordTimer?.cancel();
+    _recordTimer = null;
+    if (!_isRecording) return;
+    try {
+      final file = await c.stopVideoRecording();
+      if (!mounted) return;
+      setState(() => _isRecording = false);
+      widget.onCaptured(file, 'video');
+    } on CameraException catch (e) {
+      if (mounted) setState(() => _isRecording = false);
+      _showError(e.description ?? e.code);
+    }
+  }
+
+  Future<void> _onLibraryTap() async {
+    if (_isRecording) return;
+    final fallbackMsg = L(AppScope.of(context).lang).photoUploadFailed;
+    try {
+      XFile? picked;
+      if (_modeIdx == 1) {
+        picked = await _picker.pickVideo(source: ImageSource.gallery);
+        if (picked != null && mounted) widget.onCaptured(picked, 'video');
+      } else {
+        picked = await _picker.pickImage(
+          source: ImageSource.gallery,
+          imageQuality: 85,
+          maxWidth: 2048,
+        );
+        if (picked != null && mounted) widget.onCaptured(picked, 'photo');
+      }
+    } catch (_) {
+      _showError(fallbackMsg);
+    }
+  }
+
+  void _showError(String msg) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(msg),
+        behavior: SnackBarBehavior.floating,
+      ),
+    );
+  }
+
+  IconData _flashIcon() {
+    return switch (_flashMode) {
+      FlashMode.off => Icons.flash_off_outlined,
+      FlashMode.auto => Icons.flash_auto_outlined,
+      _ => Icons.flash_on,
+    };
+  }
+
+  String _flashLabel(L l) {
+    return switch (_flashMode) {
+      FlashMode.off => l.pick('Flash off', 'Flash off'),
+      FlashMode.auto => l.pick('Auto', 'Auto'),
+      _ => l.pick('Flash on', 'Flash on'),
+    };
+  }
+
+  String _formatElapsed() {
+    final secs = _recordElapsed.inMilliseconds / 1000;
+    return '${secs.toStringAsFixed(1)}s';
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -301,6 +495,12 @@ class _CaptureStep extends StatelessWidget {
       l.pick('Vidéo', 'Video'),
       l.pick('Live', 'Live'),
     ];
+    final cap = _kDurations[_durationIdx];
+    final progress = _isRecording
+        ? (_recordElapsed.inMilliseconds / (cap * 1000)).clamp(0.0, 1.0)
+        : 0.0;
+    final canFlip =
+        _cameras != null && _cameras!.length > 1 && !_isRecording;
     return Material(
       color: const Color(0xFF0E0805),
       child: SafeArea(
@@ -309,63 +509,35 @@ class _CaptureStep extends StatelessWidget {
         child: Stack(
           fit: StackFit.expand,
           children: [
-            // Warm gradient + radial highlights matching the design.
-            const DecoratedBox(
-              decoration: BoxDecoration(
-                gradient: LinearGradient(
-                  begin: Alignment.topCenter,
-                  end: Alignment.bottomCenter,
-                  colors: [Color(0xFF2A1A0E), Color(0xFF0E0805)],
+            // Live camera preview, or fallback gradient while initializing
+            // / on permission failure.
+            Positioned.fill(child: _buildBackdrop(l)),
+            // Rule-of-thirds grid (toggleable).
+            if (_gridOn)
+              Positioned.fill(
+                child: IgnorePointer(
+                  child: CustomPaint(painter: _ThirdsGridPainter()),
                 ),
               ),
-            ),
-            Positioned.fill(
-              child: IgnorePointer(
+            // Top dim gradient for legibility.
+            const IgnorePointer(
+              child: Positioned(
+                top: 0,
+                left: 0,
+                right: 0,
+                height: 180,
                 child: DecoratedBox(
                   decoration: BoxDecoration(
-                    gradient: RadialGradient(
-                      center: const Alignment(0, -0.4),
-                      radius: 0.9,
-                      colors: [
-                        const Color(0xFFF37221).withValues(alpha: 0.32),
-                        Colors.transparent,
-                      ],
+                    gradient: LinearGradient(
+                      begin: Alignment.topCenter,
+                      end: Alignment.bottomCenter,
+                      colors: [Color(0x80000000), Colors.transparent],
                     ),
                   ),
                 ),
               ),
             ),
-            // Rule-of-thirds grid.
-            Positioned.fill(
-              child: IgnorePointer(
-                child: CustomPaint(painter: _ThirdsGridPainter()),
-              ),
-            ),
-            // Faux subject silhouette.
-            Positioned(
-              left: 0,
-              right: 0,
-              top: 200,
-              child: Center(
-                child: Container(
-                  width: 140,
-                  height: 140,
-                  decoration: BoxDecoration(
-                    shape: BoxShape.circle,
-                    gradient: RadialGradient(
-                      center: const Alignment(-0.2, -0.3),
-                      radius: 0.75,
-                      colors: [
-                        const Color(0xFFFFC88C).withValues(alpha: 0.35),
-                        const Color(0xFFB45A28).withValues(alpha: 0.4),
-                        Colors.transparent,
-                      ],
-                    ),
-                  ),
-                ),
-              ),
-            ),
-            // Top bar: cancel · duration pills · next.
+            // Top bar: cancel · duration pills · elapsed/cap.
             Positioned(
               top: 56,
               left: 16,
@@ -376,7 +548,7 @@ class _CaptureStep extends StatelessWidget {
                   _GlassCircleButton(
                     icon: const Icon(Icons.close,
                         color: Colors.white, size: 18),
-                    onTap: onCancel,
+                    onTap: widget.onCancel,
                   ),
                   Container(
                     padding: const EdgeInsets.all(4),
@@ -387,9 +559,11 @@ class _CaptureStep extends StatelessWidget {
                     child: Row(
                       mainAxisSize: MainAxisSize.min,
                       children: List.generate(_kDurations.length, (i) {
-                        final on = i == durationIdx;
+                        final on = i == _durationIdx;
                         return GestureDetector(
-                          onTap: () => onDurationChanged(i),
+                          onTap: _isRecording
+                              ? null
+                              : () => setState(() => _durationIdx = i),
                           behavior: HitTestBehavior.opaque,
                           child: Container(
                             padding: const EdgeInsets.symmetric(
@@ -408,7 +582,8 @@ class _CaptureStep extends StatelessWidget {
                                 weight: FontWeight.w700,
                                 color: on
                                     ? const Color(0xFF0E0805)
-                                    : Colors.white,
+                                    : Colors.white.withValues(
+                                        alpha: _isRecording ? 0.4 : 1.0),
                                 height: 1,
                               ),
                             ),
@@ -417,23 +592,34 @@ class _CaptureStep extends StatelessWidget {
                       }),
                     ),
                   ),
-                  GestureDetector(
-                    onTap: canProceed ? onNext : null,
-                    behavior: HitTestBehavior.opaque,
-                    child: Padding(
-                      padding: const EdgeInsets.symmetric(
-                          horizontal: 4, vertical: 6),
-                      child: Text(
-                        '${l.next} →',
-                        style: BgFonts.body(
-                          size: 12,
-                          weight: FontWeight.w700,
-                          color: Colors.white.withValues(
-                              alpha: canProceed ? 1.0 : 0.4),
-                          height: 1,
-                        ),
-                      ),
-                    ),
+                  // Recording indicator (replaces the dead "Next →" link).
+                  SizedBox(
+                    width: 60,
+                    child: _isRecording
+                        ? Row(
+                            mainAxisAlignment: MainAxisAlignment.end,
+                            children: [
+                              Container(
+                                width: 8,
+                                height: 8,
+                                decoration: const BoxDecoration(
+                                  color: Colors.red,
+                                  shape: BoxShape.circle,
+                                ),
+                              ),
+                              const SizedBox(width: 6),
+                              Text(
+                                _formatElapsed(),
+                                style: BgFonts.body(
+                                  size: 12,
+                                  weight: FontWeight.w700,
+                                  color: Colors.white,
+                                  height: 1,
+                                ),
+                              ),
+                            ],
+                          )
+                        : const SizedBox.shrink(),
                   ),
                 ],
               ),
@@ -445,13 +631,14 @@ class _CaptureStep extends StatelessWidget {
               right: 0,
               child: Center(
                 child: _PlaceTagChip(
-                  name: placeName ?? '',
-                  neighborhood: placeNeighborhood,
-                  photoUrl: placePhotoUrl,
+                  name: widget.placeName ?? '',
+                  neighborhood: widget.placeNeighborhood,
+                  photoUrl: widget.placePhotoUrl,
                 ),
               ),
             ),
-            // Right tool rail (decorative).
+            // Right tool rail — flip / flash / grid (real). Timer + speed
+            // remain as decorative stubs for now.
             Positioned(
               right: 14,
               top: 170,
@@ -460,26 +647,38 @@ class _CaptureStep extends StatelessWidget {
                   _ToolRailButton(
                     icon: Icons.cameraswitch_outlined,
                     label: l.pick('Retourner', 'Flip'),
+                    enabled: canFlip,
+                    onTap: canFlip ? _flipCamera : null,
                   ),
                   const SizedBox(height: 18),
                   _ToolRailButton(
-                    icon: Icons.flash_on_outlined,
-                    label: l.pick('Flash', 'Flash'),
+                    icon: _flashIcon(),
+                    label: _flashLabel(l),
+                    enabled: _controller != null && !_isRecording,
+                    onTap: _controller == null || _isRecording
+                        ? null
+                        : _cycleFlash,
                   ),
                   const SizedBox(height: 18),
-                  _ToolRailButton(
+                  const _ToolRailButton(
                     icon: Icons.timer_outlined,
-                    label: l.pick('Minuteur', 'Timer'),
+                    label: 'Timer',
+                    enabled: false,
                   ),
                   const SizedBox(height: 18),
-                  _ToolRailButton(
+                  const _ToolRailButton(
                     icon: Icons.speed_outlined,
-                    label: l.pick('Vitesse', 'Speed'),
+                    label: 'Speed',
+                    enabled: false,
                   ),
                   const SizedBox(height: 18),
                   _ToolRailButton(
-                    icon: Icons.grid_on_outlined,
+                    icon: _gridOn
+                        ? Icons.grid_on_outlined
+                        : Icons.grid_off_outlined,
                     label: l.pick('Grille', 'Grid'),
+                    enabled: true,
+                    onTap: () => setState(() => _gridOn = !_gridOn),
                   ),
                 ],
               ),
@@ -494,7 +693,9 @@ class _CaptureStep extends StatelessWidget {
                 children: [
                   for (var i = 0; i < modes.length; i++) ...[
                     GestureDetector(
-                      onTap: i == 2 ? null : () => onModeChanged(i),
+                      onTap: i == 2 || _isRecording
+                          ? null
+                          : () => setState(() => _modeIdx = i),
                       behavior: HitTestBehavior.opaque,
                       child: Padding(
                         padding: const EdgeInsets.symmetric(horizontal: 8),
@@ -513,14 +714,14 @@ class _CaptureStep extends StatelessWidget {
                                   letterSpacing: 0.4,
                                   color: i == 2
                                       ? Colors.white.withValues(alpha: 0.35)
-                                      : (modeIdx == i
+                                      : (_modeIdx == i
                                           ? Colors.white
                                           : Colors.white
                                               .withValues(alpha: 0.55)),
                                 ),
                               ),
                             ),
-                            if (modeIdx == i && i != 2)
+                            if (_modeIdx == i && i != 2)
                               const Positioned(
                                 bottom: -4,
                                 child: _OrangeDot(),
@@ -533,7 +734,7 @@ class _CaptureStep extends StatelessWidget {
                 ],
               ),
             ),
-            // Bottom controls: library · record · effects.
+            // Bottom controls: library · record · effects (decorative).
             Positioned(
               bottom: 70,
               left: 32,
@@ -543,12 +744,13 @@ class _CaptureStep extends StatelessWidget {
                 children: [
                   _LibraryThumb(
                     label: l.pick('Galerie', 'Library'),
-                    onTap: onLibrary,
+                    onTap: _onLibraryTap,
                   ),
                   _RecordButton(
-                    recording: recording,
-                    onTap: onCapture,
-                    onPressedChanged: onRecordingChanged,
+                    isRecording: _isRecording,
+                    pulsing: _capturingPhoto,
+                    progress: progress,
+                    onTap: _onRecordTap,
                   ),
                   _GlassSquareButton(
                     icon: const Icon(Icons.auto_awesome_outlined,
@@ -565,7 +767,12 @@ class _CaptureStep extends StatelessWidget {
               right: 0,
               child: Center(
                 child: Text(
-                  '${l.pick('Toucher pour démarrer', 'Tap to start')} · ${_kDurations[durationIdx]}s',
+                  _isRecording
+                      ? l.pick('Toucher pour arrêter', 'Tap to stop')
+                      : (_modeIdx == 0
+                          ? l.pick('Toucher pour photographier',
+                              'Tap to take photo')
+                          : '${l.pick('Toucher pour démarrer', 'Tap to start')} · ${cap}s'),
                   style: BgFonts.body(
                     size: 10,
                     weight: FontWeight.w600,
@@ -576,6 +783,139 @@ class _CaptureStep extends StatelessWidget {
               ),
             ),
           ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildBackdrop(L l) {
+    final c = _controller;
+    if (c != null && c.value.isInitialized) {
+      // Cover-fit the preview so it fills the screen even when the camera's
+      // aspect ratio doesn't match.
+      return ClipRect(
+        child: FittedBox(
+          fit: BoxFit.cover,
+          child: SizedBox(
+            width: c.value.previewSize?.height ?? 1,
+            height: c.value.previewSize?.width ?? 1,
+            child: CameraPreview(c),
+          ),
+        ),
+      );
+    }
+    if (_initializing) {
+      return Stack(
+        fit: StackFit.expand,
+        children: [
+          const _CaptureGradientFallback(),
+          Center(
+            child: SizedBox(
+              width: 28,
+              height: 28,
+              child: CircularProgressIndicator(
+                strokeWidth: 2,
+                valueColor:
+                    const AlwaysStoppedAnimation<Color>(Color(0xFFF37221)),
+              ),
+            ),
+          ),
+        ],
+      );
+    }
+    // Permission denied / no camera / unsupported platform.
+    return Stack(
+      fit: StackFit.expand,
+      children: [
+        const _CaptureGradientFallback(),
+        Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 32),
+          child: Center(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                const Icon(Icons.no_photography_outlined,
+                    color: Colors.white70, size: 40),
+                const SizedBox(height: 12),
+                Text(
+                  _captureErrorMessage(l),
+                  textAlign: TextAlign.center,
+                  style: BgFonts.body(
+                    size: 13,
+                    color: Colors.white,
+                    height: 1.4,
+                  ),
+                ),
+                const SizedBox(height: 14),
+                GestureDetector(
+                  onTap: _onLibraryTap,
+                  child: Container(
+                    padding: const EdgeInsets.symmetric(
+                        horizontal: 16, vertical: 10),
+                    decoration: BoxDecoration(
+                      color: Colors.white,
+                      borderRadius: BorderRadius.circular(999),
+                    ),
+                    child: Text(
+                      l.pick('Choisir depuis la galerie',
+                          'Choose from library'),
+                      style: BgFonts.body(
+                        size: 12,
+                        weight: FontWeight.w700,
+                        color: const Color(0xFF0E0805),
+                        height: 1,
+                      ),
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+
+  String _captureErrorMessage(L l) {
+    switch (_error) {
+      case 'CameraAccessDenied':
+      case 'CameraAccessDeniedWithoutPrompt':
+      case 'CameraAccessRestricted':
+        return l.pick(
+          "Accès caméra refusé. Ouvrez les Réglages pour l'autoriser, ou choisissez depuis la galerie.",
+          'Camera access denied. Open Settings to allow it, or pick from your library.',
+        );
+      case 'AudioAccessDenied':
+      case 'AudioAccessDeniedWithoutPrompt':
+      case 'AudioAccessRestricted':
+        return l.pick(
+          'Accès micro refusé. Activez-le dans les Réglages pour filmer une vidéo.',
+          'Microphone access denied. Enable it in Settings to record video.',
+        );
+      case 'no_camera':
+        return l.pick("Pas de caméra disponible sur cet appareil.",
+            'No camera available on this device.');
+      case 'unsupported_platform':
+        return l.pick("La capture n'est pas disponible sur ce support.",
+            'Capture is not supported on this platform.');
+      default:
+        return l.pick("Caméra indisponible. Utilisez la galerie.",
+            'Camera unavailable. Use the library instead.');
+    }
+  }
+}
+
+class _CaptureGradientFallback extends StatelessWidget {
+  const _CaptureGradientFallback();
+
+  @override
+  Widget build(BuildContext context) {
+    return const DecoratedBox(
+      decoration: BoxDecoration(
+        gradient: LinearGradient(
+          begin: Alignment.topCenter,
+          end: Alignment.bottomCenter,
+          colors: [Color(0xFF2A1A0E), Color(0xFF0E0805)],
         ),
       ),
     );
@@ -676,33 +1016,46 @@ class _PlaceTagChip extends StatelessWidget {
 class _ToolRailButton extends StatelessWidget {
   final IconData icon;
   final String label;
-  const _ToolRailButton({required this.icon, required this.label});
+  final bool enabled;
+  final VoidCallback? onTap;
+  const _ToolRailButton({
+    required this.icon,
+    required this.label,
+    this.enabled = true,
+    this.onTap,
+  });
 
   @override
   Widget build(BuildContext context) {
-    return Column(
-      children: [
-        Container(
-          width: 38,
-          height: 38,
-          decoration: BoxDecoration(
-            color: Colors.black.withValues(alpha: 0.4),
-            shape: BoxShape.circle,
+    final tint = enabled ? 1.0 : 0.4;
+    return GestureDetector(
+      onTap: enabled ? onTap : null,
+      behavior: HitTestBehavior.opaque,
+      child: Column(
+        children: [
+          Container(
+            width: 38,
+            height: 38,
+            decoration: BoxDecoration(
+              color: Colors.black.withValues(alpha: 0.4),
+              shape: BoxShape.circle,
+            ),
+            alignment: Alignment.center,
+            child: Icon(icon,
+                color: Colors.white.withValues(alpha: tint), size: 20),
           ),
-          alignment: Alignment.center,
-          child: Icon(icon, color: Colors.white, size: 20),
-        ),
-        const SizedBox(height: 3),
-        Text(
-          label,
-          style: BgFonts.body(
-            size: 10,
-            weight: FontWeight.w600,
-            color: Colors.white.withValues(alpha: 0.85),
-            height: 1,
+          const SizedBox(height: 3),
+          Text(
+            label,
+            style: BgFonts.body(
+              size: 10,
+              weight: FontWeight.w600,
+              color: Colors.white.withValues(alpha: 0.85 * tint),
+              height: 1,
+            ),
           ),
-        ),
-      ],
+        ],
+      ),
     );
   }
 }
@@ -760,23 +1113,23 @@ class _LibraryThumb extends StatelessWidget {
 }
 
 class _RecordButton extends StatelessWidget {
-  final bool recording;
+  final bool isRecording;
+  final bool pulsing;
+  final double progress;
   final VoidCallback onTap;
-  final ValueChanged<bool> onPressedChanged;
 
   const _RecordButton({
-    required this.recording,
+    required this.isRecording,
+    required this.pulsing,
+    required this.progress,
     required this.onTap,
-    required this.onPressedChanged,
   });
 
   @override
   Widget build(BuildContext context) {
+    final blob = pulsing ? 56.0 : (isRecording ? 36.0 : 72.0);
     return GestureDetector(
       onTap: onTap,
-      onTapDown: (_) => onPressedChanged(true),
-      onTapUp: (_) => onPressedChanged(false),
-      onTapCancel: () => onPressedChanged(false),
       behavior: HitTestBehavior.opaque,
       child: SizedBox(
         width: 84,
@@ -796,20 +1149,23 @@ class _RecordButton extends StatelessWidget {
             AnimatedContainer(
               duration: const Duration(milliseconds: 200),
               curve: Curves.easeOutCubic,
-              width: recording ? 48 : 72,
-              height: recording ? 48 : 72,
+              width: blob,
+              height: blob,
               decoration: BoxDecoration(
                 color: const Color(0xFFF37221),
                 borderRadius:
-                    BorderRadius.circular(recording ? 8 : 999),
+                    BorderRadius.circular(isRecording ? 8 : 999),
               ),
             ),
-            // Decorative progress arc.
-            const SizedBox(
-              width: 84,
-              height: 84,
-              child: CustomPaint(painter: _RecordRingPainter(progress: 0.32)),
-            ),
+            // Live progress arc when recording.
+            if (isRecording)
+              SizedBox(
+                width: 84,
+                height: 84,
+                child: CustomPaint(
+                  painter: _RecordRingPainter(progress: progress),
+                ),
+              ),
           ],
         ),
       ),
@@ -841,7 +1197,8 @@ class _RecordRingPainter extends CustomPainter {
   }
 
   @override
-  bool shouldRepaint(covariant CustomPainter oldDelegate) => false;
+  bool shouldRepaint(covariant _RecordRingPainter oldDelegate) =>
+      oldDelegate.progress != progress;
 }
 
 class _GlassCircleButton extends StatelessWidget {
@@ -896,29 +1253,328 @@ class _GlassSquareButton extends StatelessWidget {
 // Step 2 — Edit
 // ─────────────────────────────────────────────
 
-class _EditStep extends StatelessWidget {
+// Filter palette — index 0 is identity. Each ColorMatrix is 4×5 row-major
+// (R, G, B, A, offset).
+const _kFilterMatrices = <List<double>>[
+  [
+    1, 0, 0, 0, 0, //
+    0, 1, 0, 0, 0, //
+    0, 0, 1, 0, 0, //
+    0, 0, 0, 1, 0, //
+  ],
+  // Warm — boost reds, lift midtones.
+  [
+    1.05, 0.0, 0.0, 0.0, 12.0, //
+    0.0, 1.0, 0.0, 0.0, 8.0, //
+    0.0, 0.0, 0.85, 0.0, -8.0, //
+    0.0, 0.0, 0.0, 1.0, 0.0, //
+  ],
+  // Market — sepia-ish.
+  [
+    0.393, 0.769, 0.189, 0.0, 0.0, //
+    0.349, 0.686, 0.168, 0.0, 0.0, //
+    0.272, 0.534, 0.131, 0.0, 0.0, //
+    0.0, 0.0, 0.0, 1.0, 0.0, //
+  ],
+  // Evening — cool / blueish.
+  [
+    0.85, 0.0, 0.10, 0.0, 0.0, //
+    0.0, 0.90, 0.0, 0.0, 0.0, //
+    0.05, 0.0, 1.05, 0.0, 5.0, //
+    0.0, 0.0, 0.0, 1.0, 0.0, //
+  ],
+  // Vivid — saturated.
+  [
+    1.30, -0.15, -0.15, 0.0, 0.0, //
+    -0.15, 1.30, -0.15, 0.0, 0.0, //
+    -0.15, -0.15, 1.30, 0.0, 0.0, //
+    0.0, 0.0, 0.0, 1.0, 0.0, //
+  ],
+  // Soft — desat, slight lift.
+  [
+    0.65, 0.20, 0.15, 0.0, 12.0, //
+    0.20, 0.65, 0.15, 0.0, 12.0, //
+    0.15, 0.20, 0.65, 0.0, 12.0, //
+    0.0, 0.0, 0.0, 1.0, 0.0, //
+  ],
+];
+
+ColorFilter _filterFor(int idx) =>
+    ColorFilter.matrix(_kFilterMatrices[idx.clamp(0, _kFilterMatrices.length - 1)]);
+
+enum _OverlayKind { text, sticker }
+
+class _EditOverlay {
+  _EditOverlay({
+    required this.id,
+    required this.kind,
+    required this.content,
+    required this.position,
+    this.fontSize = 22,
+    this.styleIdx = 0,
+  });
+  final String id;
+  final _OverlayKind kind;
+  String content;
+  Offset position;
+  double fontSize;
+  // Text style index: 0 = orange filled, 1 = white pill, 2 = black pill.
+  int styleIdx;
+}
+
+class _EditStep extends StatefulWidget {
   final XFile? picked;
   final String kind;
-  final int filterIdx;
-  final ValueChanged<int> onFilterChanged;
   final VoidCallback onBack;
-  final VoidCallback onNext;
+  final void Function(XFile editedFile) onDone;
 
   const _EditStep({
     required this.picked,
     required this.kind,
-    required this.filterIdx,
-    required this.onFilterChanged,
     required this.onBack,
-    required this.onNext,
+    required this.onDone,
   });
+
+  @override
+  State<_EditStep> createState() => _EditStepState();
+}
+
+class _EditStepState extends State<_EditStep> {
+  // Tool indices: 0=Trim, 1=Cover, 2=Text, 3=Stickers, 4=Sound, 5=Filters.
+  static const int _toolFilters = 5;
+  int _filterIdx = 0;
+  int _activeTool = _toolFilters;
+  final List<_EditOverlay> _overlays = [];
+  String? _selectedOverlayId;
+  bool _baking = false;
+  final GlobalKey _captureKey = GlobalKey();
+  int _overlayCounter = 0;
+  VideoPlayerController? _videoCtl;
+  bool _videoReady = false;
+
+  @override
+  void initState() {
+    super.initState();
+    if (widget.kind == 'video' &&
+        widget.picked != null &&
+        widget.picked!.path.isNotEmpty) {
+      _initVideoPreview();
+    }
+  }
+
+  Future<void> _initVideoPreview() async {
+    try {
+      final ctl = VideoPlayerController.file(File(widget.picked!.path));
+      await ctl.initialize();
+      await ctl.setLooping(false);
+      await ctl.seekTo(Duration.zero);
+      await ctl.pause();
+      if (!mounted) {
+        await ctl.dispose();
+        return;
+      }
+      setState(() {
+        _videoCtl = ctl;
+        _videoReady = true;
+      });
+    } catch (_) {
+      // Fall back to placeholder backdrop on failure.
+    }
+  }
+
+  @override
+  void dispose() {
+    _videoCtl?.dispose();
+    super.dispose();
+  }
+
+  String _newId() => 'ov_${++_overlayCounter}';
+
+  Future<void> _onAddText() async {
+    final added = await showModalBottomSheet<_EditOverlay>(
+      context: context,
+      backgroundColor: const Color(0xFF1A1208),
+      isScrollControlled: true,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(18)),
+      ),
+      builder: (_) => _TextOverlayEditor(
+        idBuilder: _newId,
+        initialPosition: _centerPosition(),
+      ),
+    );
+    if (added == null || !mounted) return;
+    setState(() {
+      _overlays.add(added);
+      _selectedOverlayId = added.id;
+      _activeTool = 2;
+    });
+  }
+
+  Future<void> _onAddSticker() async {
+    final emoji = await showModalBottomSheet<String>(
+      context: context,
+      backgroundColor: const Color(0xFF1A1208),
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(18)),
+      ),
+      builder: (_) => const _StickerPicker(),
+    );
+    if (emoji == null || !mounted) return;
+    final ov = _EditOverlay(
+      id: _newId(),
+      kind: _OverlayKind.sticker,
+      content: emoji,
+      position: _centerPosition(),
+      fontSize: 56,
+    );
+    setState(() {
+      _overlays.add(ov);
+      _selectedOverlayId = ov.id;
+      _activeTool = 3;
+    });
+  }
+
+  Offset _centerPosition() {
+    // Slight randomization so consecutively-added overlays don't stack.
+    final mq = MediaQuery.of(context).size;
+    final jitter = (_overlayCounter % 4) * 18.0;
+    return Offset(
+      mq.width / 2 - 60 + jitter,
+      mq.height / 2 - 30 + jitter,
+    );
+  }
+
+  void _onTabTap(int idx) {
+    final l = L(AppScope.of(context).lang);
+    switch (idx) {
+      case 0: // Trim
+      case 1: // Cover
+      case 4: // Sound
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+          content: Text(_deferredToolMessage(l, idx)),
+          behavior: SnackBarBehavior.floating,
+          duration: const Duration(seconds: 2),
+        ));
+        return;
+      case 2:
+        setState(() => _activeTool = idx);
+        _onAddText();
+        return;
+      case 3:
+        setState(() => _activeTool = idx);
+        _onAddSticker();
+        return;
+      case _toolFilters:
+        setState(() => _activeTool = idx);
+        return;
+    }
+  }
+
+  String _deferredToolMessage(L l, int idx) {
+    switch (idx) {
+      case 0:
+        return l.pick(
+            "Le découpage vidéo arrive bientôt.", 'Video trim is coming soon.');
+      case 1:
+        return l.pick(
+            "Le choix de la miniature arrive bientôt.",
+            'Cover frame picker is coming soon.');
+      default:
+        return l.pick(
+            "L'ajout de musique arrive bientôt.", 'Music is coming soon.');
+    }
+  }
+
+  void _onSelectOverlay(String? id) {
+    setState(() => _selectedOverlayId = id);
+  }
+
+  void _onMoveOverlay(_EditOverlay ov, Offset delta) {
+    setState(() => ov.position += delta);
+  }
+
+  void _onScaleSelected(double factor) {
+    final id = _selectedOverlayId;
+    if (id == null) return;
+    final ov = _overlays.firstWhere((o) => o.id == id, orElse: () => _overlays.first);
+    setState(() {
+      if (ov.kind == _OverlayKind.text) {
+        ov.fontSize = (ov.fontSize * factor).clamp(10.0, 64.0);
+      } else {
+        ov.fontSize = (ov.fontSize * factor).clamp(20.0, 160.0);
+      }
+    });
+  }
+
+  void _onDeleteSelected() {
+    final id = _selectedOverlayId;
+    if (id == null) return;
+    setState(() {
+      _overlays.removeWhere((o) => o.id == id);
+      _selectedOverlayId = null;
+    });
+  }
+
+  Future<void> _onNext() async {
+    if (_baking) return;
+    setState(() => _baking = true);
+    try {
+      // Drop selection ring before capture so it isn't burned in.
+      final preserved = _selectedOverlayId;
+      setState(() => _selectedOverlayId = null);
+      await WidgetsBinding.instance.endOfFrame;
+
+      XFile out;
+      if (widget.kind == 'photo') {
+        out = await _bakePhoto();
+      } else {
+        // Video: pass through. Filter / overlays are preview-only this pass.
+        out = widget.picked ?? XFile('');
+      }
+      if (preserved != null) {
+        setState(() => _selectedOverlayId = preserved);
+      }
+      if (!mounted) return;
+      widget.onDone(out);
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+        content: Text(L(AppScope.of(context).lang)
+            .pick("Échec de l'export. Réessayez.", 'Export failed. Try again.')),
+        behavior: SnackBarBehavior.floating,
+      ));
+    } finally {
+      if (mounted) setState(() => _baking = false);
+    }
+  }
+
+  Future<XFile> _bakePhoto() async {
+    final ctx = _captureKey.currentContext;
+    if (ctx == null) {
+      return widget.picked ?? XFile('');
+    }
+    final boundary = ctx.findRenderObject() as RenderRepaintBoundary;
+    final pixelRatio =
+        MediaQuery.of(context).devicePixelRatio.clamp(1.5, 3.0).toDouble();
+    final image = await boundary.toImage(pixelRatio: pixelRatio);
+    final byteData = await image.toByteData(format: ui.ImageByteFormat.png);
+    image.dispose();
+    if (byteData == null) {
+      return widget.picked ?? XFile('');
+    }
+    final bytes = byteData.buffer.asUint8List();
+    final tmpDir = Directory.systemTemp;
+    final filename =
+        'edit_${DateTime.now().millisecondsSinceEpoch}.png';
+    final file = File('${tmpDir.path}/$filename');
+    await file.writeAsBytes(bytes);
+    return XFile(file.path);
+  }
 
   @override
   Widget build(BuildContext context) {
     final l = L(AppScope.of(context).lang);
-    final filters = l.isFr
-        ? const ['Original', 'Chaleur', 'Marché', 'Soir', 'Vif', 'Doux']
-        : const ['Original', 'Warm', 'Market', 'Evening', 'Vivid', 'Soft'];
     return Material(
       color: const Color(0xFF0E0805),
       child: SafeArea(
@@ -927,27 +1583,80 @@ class _EditStep extends StatelessWidget {
         child: Stack(
           fit: StackFit.expand,
           children: [
-            // Preview backdrop.
-            Positioned.fill(child: _PreviewBackdrop(picked: picked, kind: kind)),
-            // Top/bottom dim gradients.
-            const IgnorePointer(
-              child: DecoratedBox(
-                decoration: BoxDecoration(
-                  gradient: LinearGradient(
-                    begin: Alignment.topCenter,
-                    end: Alignment.bottomCenter,
-                    colors: [
-                      Color(0x80000000),
-                      Colors.transparent,
-                      Colors.transparent,
-                      Color(0xB3000000),
+            // Editing canvas — captured by RepaintBoundary on bake.
+            Positioned.fill(
+              child: RepaintBoundary(
+                key: _captureKey,
+                child: ColorFiltered(
+                  colorFilter: _filterFor(_filterIdx),
+                  child: Stack(
+                    fit: StackFit.expand,
+                    children: [
+                      Positioned.fill(
+                        child: _PreviewBackdrop(
+                          picked: widget.picked,
+                          kind: widget.kind,
+                          videoController:
+                              _videoReady ? _videoCtl : null,
+                        ),
+                      ),
+                      for (final ov in _overlays)
+                        _OverlayView(
+                          overlay: ov,
+                          selected: _selectedOverlayId == ov.id,
+                          onTap: () => _onSelectOverlay(ov.id),
+                          onPan: (d) => _onMoveOverlay(ov, d),
+                        ),
                     ],
-                    stops: [0.0, 0.18, 0.6, 1.0],
                   ),
                 ),
               ),
             ),
-            // Top bar.
+            // Tap outside overlays to deselect.
+            if (_selectedOverlayId != null)
+              Positioned.fill(
+                child: GestureDetector(
+                  behavior: HitTestBehavior.translucent,
+                  onTap: () => _onSelectOverlay(null),
+                ),
+              ),
+            // Top dim gradient (outside RepaintBoundary).
+            const IgnorePointer(
+              child: Positioned(
+                top: 0,
+                left: 0,
+                right: 0,
+                height: 160,
+                child: DecoratedBox(
+                  decoration: BoxDecoration(
+                    gradient: LinearGradient(
+                      begin: Alignment.topCenter,
+                      end: Alignment.bottomCenter,
+                      colors: [Color(0xB3000000), Colors.transparent],
+                    ),
+                  ),
+                ),
+              ),
+            ),
+            // Bottom dim gradient.
+            const IgnorePointer(
+              child: Positioned(
+                bottom: 0,
+                left: 0,
+                right: 0,
+                height: 280,
+                child: DecoratedBox(
+                  decoration: BoxDecoration(
+                    gradient: LinearGradient(
+                      begin: Alignment.bottomCenter,
+                      end: Alignment.topCenter,
+                      colors: [Color(0xCC000000), Colors.transparent],
+                    ),
+                  ),
+                ),
+              ),
+            ),
+            // Top bar (outside RepaintBoundary so chrome isn't baked in).
             Positioned(
               top: 56,
               left: 16,
@@ -957,7 +1666,7 @@ class _EditStep extends StatelessWidget {
                 crossAxisAlignment: CrossAxisAlignment.center,
                 children: [
                   GestureDetector(
-                    onTap: onBack,
+                    onTap: _baking ? null : widget.onBack,
                     behavior: HitTestBehavior.opaque,
                     child: Container(
                       padding: const EdgeInsets.symmetric(
@@ -988,226 +1697,94 @@ class _EditStep extends StatelessWidget {
                     ),
                   ),
                   GestureDetector(
-                    onTap: onNext,
+                    onTap: _baking ? null : _onNext,
                     behavior: HitTestBehavior.opaque,
                     child: Container(
                       padding: const EdgeInsets.symmetric(
                           horizontal: 16, vertical: 8),
                       decoration: BoxDecoration(
-                        color: const Color(0xFFF37221),
+                        color: const Color(0xFFF37221).withValues(
+                            alpha: _baking ? 0.6 : 1.0),
                         borderRadius: BorderRadius.circular(999),
                       ),
-                      child: Text(
-                        '${l.next} →',
-                        style: BgFonts.body(
-                          size: 12,
-                          weight: FontWeight.w700,
-                          color: Colors.white,
-                          height: 1,
-                        ),
-                      ),
+                      child: _baking
+                          ? const SizedBox(
+                              width: 14,
+                              height: 14,
+                              child: CircularProgressIndicator(
+                                strokeWidth: 2,
+                                valueColor: AlwaysStoppedAnimation<Color>(
+                                    Colors.white),
+                              ),
+                            )
+                          : Text(
+                              '${l.next} →',
+                              style: BgFonts.body(
+                                size: 12,
+                                weight: FontWeight.w700,
+                                color: Colors.white,
+                                height: 1,
+                              ),
+                            ),
                     ),
                   ),
                 ],
               ),
             ),
-            // Decorative text overlays.
-            Positioned(
-              top: MediaQuery.of(context).size.height * 0.32,
-              left: 0,
-              right: 0,
-              child: Center(
-                child: Transform.rotate(
-                  angle: -0.035,
-                  child: Container(
-                    padding: const EdgeInsets.symmetric(
-                        horizontal: 12, vertical: 6),
-                    decoration: BoxDecoration(
-                      color: const Color(0xFFF37221).withValues(alpha: 0.92),
-                      borderRadius: BorderRadius.circular(8),
-                    ),
-                    child: Text(
-                      l.pick('POULET BRAISÉ 🔥', 'GRILLED CHICKEN 🔥'),
-                      style: BgFonts.display(
-                        size: 18,
-                        weight: FontWeight.w800,
-                        color: Colors.white,
-                        letterSpacing: -0.3,
-                      ),
-                    ),
-                  ),
+            // Selected-overlay floating toolbar (size + delete).
+            if (_selectedOverlayId != null)
+              Positioned(
+                top: 110,
+                right: 16,
+                child: _SelectedOverlayToolbar(
+                  onDelete: _onDeleteSelected,
+                  onScaleUp: () => _onScaleSelected(1.15),
+                  onScaleDown: () => _onScaleSelected(0.87),
                 ),
               ),
-            ),
-            Positioned(
-              top: MediaQuery.of(context).size.height * 0.40,
-              left: MediaQuery.of(context).size.width * 0.12,
-              child: Container(
-                padding:
-                    const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
-                decoration: BoxDecoration(
-                  color: Colors.white.withValues(alpha: 0.95),
-                  borderRadius: BorderRadius.circular(8),
-                ),
-                child: Text(
-                  '4 800 F',
-                  style: BgFonts.display(
-                    size: 13,
-                    weight: FontWeight.w700,
-                    color: const Color(0xFF2A1A0E),
-                    letterSpacing: -0.2,
+            // Video-only banner: filters/overlays preview only.
+            if (widget.kind == 'video' && _overlays.isNotEmpty)
+              Positioned(
+                top: 110,
+                left: 16,
+                child: Container(
+                  padding: const EdgeInsets.symmetric(
+                      horizontal: 10, vertical: 6),
+                  decoration: BoxDecoration(
+                    color: Colors.black.withValues(alpha: 0.6),
+                    borderRadius: BorderRadius.circular(999),
                   ),
-                ),
-              ),
-            ),
-            // Music chip.
-            Positioned(
-              top: 110,
-              left: 16,
-              child: Container(
-                padding: const EdgeInsets.fromLTRB(7, 7, 12, 7),
-                decoration: BoxDecoration(
-                  color: Colors.black.withValues(alpha: 0.45),
-                  borderRadius: BorderRadius.circular(999),
-                ),
-                child: Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    Container(
-                      width: 22,
-                      height: 22,
-                      decoration: const BoxDecoration(
-                        color: Color(0xFFF37221),
-                        shape: BoxShape.circle,
-                      ),
-                      alignment: Alignment.center,
-                      child: const Icon(Icons.music_note,
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      const Icon(Icons.info_outline,
                           color: Colors.white, size: 12),
-                    ),
-                    const SizedBox(width: 8),
-                    SizedBox(
-                      width: 180,
-                      child: Text(
-                        'Awilo Longomba — Coupé Bibamba',
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
+                      const SizedBox(width: 6),
+                      Text(
+                        l.pick('Aperçu seulement', 'Preview only'),
                         style: BgFonts.body(
-                          size: 11,
-                          weight: FontWeight.w600,
+                          size: 10,
+                          weight: FontWeight.w700,
                           color: Colors.white,
                           height: 1,
                         ),
                       ),
-                    ),
-                  ],
+                    ],
+                  ),
                 ),
               ),
-            ),
-            // Trim caption.
+            // Filter strip (always visible; this is the most useful tool).
             Positioned(
-              bottom: 178,
-              left: 16,
-              child: Text(
-                '00:03 → 00:42 · 39s',
-                style: BgFonts.mono(
-                  size: 10,
-                  color: Colors.white.withValues(alpha: 0.8),
-                ),
-              ),
-            ),
-            // Trim timeline.
-            Positioned(
-              bottom: 130,
-              left: 16,
-              right: 16,
-              child: SizedBox(
-                height: 44,
-                child: Stack(
-                  children: [
-                    ClipRRect(
-                      borderRadius: BorderRadius.circular(8),
-                      child: Row(
-                        children: List.generate(
-                          12,
-                          (i) => Expanded(
-                            child: PhotoPlaceholder(
-                              seed: 'up-frame-$i',
-                              showLabel: false,
-                            ),
-                          ),
-                        ),
-                      ),
-                    ),
-                    Positioned(
-                      left: 44,
-                      right: 64,
-                      top: 0,
-                      bottom: 0,
-                      child: DecoratedBox(
-                        decoration: BoxDecoration(
-                          border: Border.all(
-                              color: const Color(0xFFF37221), width: 3),
-                          borderRadius: BorderRadius.circular(6),
-                        ),
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-            ),
-            // Filter strip.
-            Positioned(
-              bottom: 200,
+              bottom: 90,
               left: 0,
               right: 0,
               child: SizedBox(
                 height: 96,
-                child: ListView.separated(
-                  scrollDirection: Axis.horizontal,
-                  padding: const EdgeInsets.symmetric(horizontal: 16),
-                  itemCount: filters.length,
-                  separatorBuilder: (_, _) => const SizedBox(width: 8),
-                  itemBuilder: (_, i) {
-                    final on = i == filterIdx;
-                    return GestureDetector(
-                      onTap: () => onFilterChanged(i),
-                      behavior: HitTestBehavior.opaque,
-                      child: Column(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          Container(
-                            width: 52,
-                            height: 70,
-                            decoration: BoxDecoration(
-                              borderRadius: BorderRadius.circular(10),
-                              border: Border.all(
-                                color: on
-                                    ? const Color(0xFFF37221)
-                                    : Colors.transparent,
-                                width: 2,
-                              ),
-                            ),
-                            clipBehavior: Clip.antiAlias,
-                            child: const PhotoPlaceholder(
-                              seed: 'up-preview',
-                              showLabel: false,
-                            ),
-                          ),
-                          const SizedBox(height: 5),
-                          Text(
-                            filters[i],
-                            style: BgFonts.body(
-                              size: 10,
-                              weight: FontWeight.w600,
-                              color: Colors.white.withValues(
-                                  alpha: on ? 1 : 0.7),
-                              height: 1,
-                            ),
-                          ),
-                        ],
-                      ),
-                    );
-                  },
+                child: _FilterStrip(
+                  picked: widget.picked,
+                  kind: widget.kind,
+                  filterIdx: _filterIdx,
+                  onChanged: (i) => setState(() => _filterIdx = i),
                 ),
               ),
             ),
@@ -1216,7 +1793,11 @@ class _EditStep extends StatelessWidget {
               bottom: 30,
               left: 0,
               right: 0,
-              child: _EditToolTabs(l: l),
+              child: _EditToolTabs(
+                l: l,
+                activeTool: _activeTool,
+                onTap: _onTabTap,
+              ),
             ),
           ],
         ),
@@ -1228,7 +1809,13 @@ class _EditStep extends StatelessWidget {
 class _PreviewBackdrop extends StatelessWidget {
   final XFile? picked;
   final String kind;
-  const _PreviewBackdrop({required this.picked, required this.kind});
+  final VideoPlayerController? videoController;
+
+  const _PreviewBackdrop({
+    required this.picked,
+    required this.kind,
+    this.videoController,
+  });
 
   @override
   Widget build(BuildContext context) {
@@ -1243,7 +1830,19 @@ class _PreviewBackdrop extends StatelessWidget {
         ),
       );
     }
-    // For video or no-pick fall back to the design's placeholder.
+    if (kind == 'video' && videoController != null) {
+      final c = videoController!;
+      return ClipRect(
+        child: FittedBox(
+          fit: BoxFit.cover,
+          child: SizedBox(
+            width: c.value.size.width == 0 ? 1 : c.value.size.width,
+            height: c.value.size.height == 0 ? 1 : c.value.size.height,
+            child: VideoPlayer(c),
+          ),
+        ),
+      );
+    }
     return const PhotoPlaceholder(
       seed: 'up-preview',
       label: 'POULET BRAISÉ · TERRASSE',
@@ -1252,46 +1851,588 @@ class _PreviewBackdrop extends StatelessWidget {
   }
 }
 
-class _EditToolTabs extends StatelessWidget {
-  final L l;
-  const _EditToolTabs({required this.l});
+class _OverlayView extends StatelessWidget {
+  final _EditOverlay overlay;
+  final bool selected;
+  final VoidCallback onTap;
+  final ValueChanged<Offset> onPan;
+
+  const _OverlayView({
+    required this.overlay,
+    required this.selected,
+    required this.onTap,
+    required this.onPan,
+  });
 
   @override
   Widget build(BuildContext context) {
-    final tabs = [
-      (Icons.content_cut, l.pick('Couper', 'Trim'), true),
+    Widget content;
+    switch (overlay.kind) {
+      case _OverlayKind.text:
+        content = _TextOverlayChip(overlay: overlay);
+        break;
+      case _OverlayKind.sticker:
+        content = Text(
+          overlay.content,
+          style: TextStyle(
+            fontSize: overlay.fontSize,
+            // No font family — rely on system emoji rendering.
+            shadows: const [
+              Shadow(color: Color(0x80000000), blurRadius: 6, offset: Offset(0, 2)),
+            ],
+          ),
+        );
+        break;
+    }
+    final framed = selected
+        ? Container(
+            padding: const EdgeInsets.all(2),
+            decoration: BoxDecoration(
+              border: Border.all(
+                color: Colors.white.withValues(alpha: 0.9),
+                width: 1.5,
+              ),
+              borderRadius: BorderRadius.circular(8),
+            ),
+            child: content,
+          )
+        : content;
+    return Positioned(
+      left: overlay.position.dx,
+      top: overlay.position.dy,
+      child: GestureDetector(
+        onTap: onTap,
+        onPanUpdate: (d) => onPan(d.delta),
+        behavior: HitTestBehavior.opaque,
+        child: framed,
+      ),
+    );
+  }
+}
+
+class _TextOverlayChip extends StatelessWidget {
+  final _EditOverlay overlay;
+  const _TextOverlayChip({required this.overlay});
+
+  @override
+  Widget build(BuildContext context) {
+    final styles = _kTextStyles[overlay.styleIdx.clamp(0, _kTextStyles.length - 1)];
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+      decoration: BoxDecoration(
+        color: styles.bgColor,
+        borderRadius: BorderRadius.circular(8),
+      ),
+      child: Text(
+        overlay.content,
+        style: BgFonts.display(
+          size: overlay.fontSize,
+          weight: FontWeight.w800,
+          color: styles.textColor,
+          letterSpacing: -0.2,
+        ),
+      ),
+    );
+  }
+}
+
+class _TextStyleSpec {
+  final Color bgColor;
+  final Color textColor;
+  const _TextStyleSpec({required this.bgColor, required this.textColor});
+}
+
+const _kTextStyles = <_TextStyleSpec>[
+  _TextStyleSpec(bgColor: Color(0xEBF37221), textColor: Colors.white),
+  _TextStyleSpec(bgColor: Color(0xF2FFFFFF), textColor: Color(0xFF2A1A0E)),
+  _TextStyleSpec(bgColor: Color(0xCC000000), textColor: Colors.white),
+];
+
+class _SelectedOverlayToolbar extends StatelessWidget {
+  final VoidCallback onDelete;
+  final VoidCallback onScaleUp;
+  final VoidCallback onScaleDown;
+  const _SelectedOverlayToolbar({
+    required this.onDelete,
+    required this.onScaleUp,
+    required this.onScaleDown,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 6),
+      decoration: BoxDecoration(
+        color: Colors.black.withValues(alpha: 0.55),
+        borderRadius: BorderRadius.circular(999),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          _IconBtn(icon: Icons.remove, onTap: onScaleDown),
+          _IconBtn(icon: Icons.add, onTap: onScaleUp),
+          _IconBtn(icon: Icons.delete_outline, onTap: onDelete),
+        ],
+      ),
+    );
+  }
+}
+
+class _IconBtn extends StatelessWidget {
+  final IconData icon;
+  final VoidCallback onTap;
+  const _IconBtn({required this.icon, required this.onTap});
+
+  @override
+  Widget build(BuildContext context) {
+    return GestureDetector(
+      onTap: onTap,
+      behavior: HitTestBehavior.opaque,
+      child: Container(
+        width: 32,
+        height: 32,
+        margin: const EdgeInsets.symmetric(horizontal: 2),
+        decoration: const BoxDecoration(
+          color: Color(0x33FFFFFF),
+          shape: BoxShape.circle,
+        ),
+        alignment: Alignment.center,
+        child: Icon(icon, color: Colors.white, size: 16),
+      ),
+    );
+  }
+}
+
+class _FilterStrip extends StatelessWidget {
+  final XFile? picked;
+  final String kind;
+  final int filterIdx;
+  final ValueChanged<int> onChanged;
+
+  const _FilterStrip({
+    required this.picked,
+    required this.kind,
+    required this.filterIdx,
+    required this.onChanged,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final l = L(AppScope.of(context).lang);
+    final names = l.isFr
+        ? const ['Original', 'Chaleur', 'Marché', 'Soir', 'Vif', 'Doux']
+        : const ['Original', 'Warm', 'Market', 'Evening', 'Vivid', 'Soft'];
+    Widget thumb() {
+      if (picked != null && kind == 'photo') {
+        return Image.file(
+          File(picked!.path),
+          fit: BoxFit.cover,
+          errorBuilder: (_, _, _) =>
+              const PhotoPlaceholder(seed: 'up-preview', showLabel: false),
+        );
+      }
+      return const PhotoPlaceholder(seed: 'up-preview', showLabel: false);
+    }
+
+    return ListView.separated(
+      scrollDirection: Axis.horizontal,
+      padding: const EdgeInsets.symmetric(horizontal: 16),
+      itemCount: names.length,
+      separatorBuilder: (_, _) => const SizedBox(width: 8),
+      itemBuilder: (_, i) {
+        final on = i == filterIdx;
+        return GestureDetector(
+          onTap: () => onChanged(i),
+          behavior: HitTestBehavior.opaque,
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Container(
+                width: 52,
+                height: 70,
+                decoration: BoxDecoration(
+                  borderRadius: BorderRadius.circular(10),
+                  border: Border.all(
+                    color: on ? const Color(0xFFF37221) : Colors.transparent,
+                    width: 2,
+                  ),
+                ),
+                clipBehavior: Clip.antiAlias,
+                child: ColorFiltered(
+                  colorFilter: _filterFor(i),
+                  child: SizedBox.expand(child: thumb()),
+                ),
+              ),
+              const SizedBox(height: 5),
+              Text(
+                names[i],
+                style: BgFonts.body(
+                  size: 10,
+                  weight: FontWeight.w600,
+                  color: Colors.white.withValues(alpha: on ? 1 : 0.7),
+                  height: 1,
+                ),
+              ),
+            ],
+          ),
+        );
+      },
+    );
+  }
+}
+
+class _EditToolTabs extends StatelessWidget {
+  final L l;
+  final int activeTool;
+  final ValueChanged<int> onTap;
+  const _EditToolTabs({
+    required this.l,
+    required this.activeTool,
+    required this.onTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final tabs = <(IconData, String, bool)>[
+      (Icons.content_cut, l.pick('Couper', 'Trim'), false),
       (Icons.image_outlined, l.pick('Miniature', 'Cover'), false),
-      (Icons.text_fields_outlined, l.pick('Texte', 'Text'), false),
-      (Icons.auto_awesome_outlined, l.pick('Stickers', 'Stickers'), false),
+      (Icons.text_fields_outlined, l.pick('Texte', 'Text'), true),
+      (Icons.auto_awesome_outlined, l.pick('Stickers', 'Stickers'), true),
       (Icons.music_note_outlined, l.pick('Son', 'Sound'), false),
-      (Icons.auto_fix_high_outlined, l.pick('Filtres', 'Filters'), false),
+      (Icons.auto_fix_high_outlined, l.pick('Filtres', 'Filters'), true),
     ];
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 12),
       child: Row(
         mainAxisAlignment: MainAxisAlignment.spaceAround,
-        children: tabs.map((t) {
-          final color = t.$3
-              ? const Color(0xFFF37221)
-              : Colors.white.withValues(alpha: 0.85);
-          return Column(
+        children: List.generate(tabs.length, (i) {
+          final (icon, label, enabled) = tabs[i];
+          final on = activeTool == i && enabled;
+          final color = enabled
+              ? (on
+                  ? const Color(0xFFF37221)
+                  : Colors.white.withValues(alpha: 0.85))
+              : Colors.white.withValues(alpha: 0.35);
+          return GestureDetector(
+            onTap: () => onTap(i),
+            behavior: HitTestBehavior.opaque,
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 4),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Icon(icon, color: color, size: 20),
+                  const SizedBox(height: 5),
+                  Text(
+                    label,
+                    style: BgFonts.body(
+                      size: 10,
+                      weight: FontWeight.w700,
+                      color: color,
+                      letterSpacing: 0.2,
+                      height: 1,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          );
+        }),
+      ),
+    );
+  }
+}
+
+class _TextOverlayEditor extends StatefulWidget {
+  final String Function() idBuilder;
+  final Offset initialPosition;
+
+  const _TextOverlayEditor({
+    required this.idBuilder,
+    required this.initialPosition,
+  });
+
+  @override
+  State<_TextOverlayEditor> createState() => _TextOverlayEditorState();
+}
+
+class _TextOverlayEditorState extends State<_TextOverlayEditor> {
+  final TextEditingController _ctl = TextEditingController();
+  int _styleIdx = 0;
+  double _fontSize = 22;
+
+  @override
+  void dispose() {
+    _ctl.dispose();
+    super.dispose();
+  }
+
+  void _submit() {
+    final text = _ctl.text.trim();
+    if (text.isEmpty) {
+      Navigator.of(context).pop();
+      return;
+    }
+    Navigator.of(context).pop(_EditOverlay(
+      id: widget.idBuilder(),
+      kind: _OverlayKind.text,
+      content: text,
+      position: widget.initialPosition,
+      fontSize: _fontSize,
+      styleIdx: _styleIdx,
+    ));
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final l = L(AppScope.of(context).lang);
+    final mq = MediaQuery.of(context);
+    return Padding(
+      padding: EdgeInsets.only(bottom: mq.viewInsets.bottom),
+      child: SafeArea(
+        top: false,
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(16, 12, 16, 16),
+          child: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
-              Icon(t.$1, color: color, size: 20),
-              const SizedBox(height: 5),
-              Text(
-                t.$2,
-                style: BgFonts.body(
-                  size: 10,
-                  weight: FontWeight.w700,
-                  color: color,
-                  letterSpacing: 0.2,
-                  height: 1,
+              Container(
+                width: 40,
+                height: 4,
+                decoration: BoxDecoration(
+                  color: Colors.white.withValues(alpha: 0.2),
+                  borderRadius: BorderRadius.circular(2),
                 ),
               ),
+              const SizedBox(height: 14),
+              TextField(
+                controller: _ctl,
+                autofocus: true,
+                maxLength: 80,
+                style: BgFonts.display(
+                  size: 18,
+                  weight: FontWeight.w800,
+                  color: Colors.white,
+                ),
+                decoration: InputDecoration(
+                  hintText: l.pick('Ajouter du texte', 'Add text'),
+                  hintStyle: BgFonts.body(
+                    size: 14,
+                    color: Colors.white.withValues(alpha: 0.5),
+                  ),
+                  counterStyle: BgFonts.body(
+                    size: 10,
+                    color: Colors.white.withValues(alpha: 0.5),
+                  ),
+                  filled: true,
+                  fillColor: Colors.white.withValues(alpha: 0.08),
+                  border: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(12),
+                    borderSide: BorderSide.none,
+                  ),
+                ),
+                textInputAction: TextInputAction.done,
+                onSubmitted: (_) => _submit(),
+              ),
+              const SizedBox(height: 14),
+              Row(
+                children: [
+                  Text(
+                    l.pick('Style', 'Style').toUpperCase(),
+                    style: BgFonts.body(
+                      size: 10,
+                      weight: FontWeight.w700,
+                      color: Colors.white.withValues(alpha: 0.7),
+                      letterSpacing: 0.4,
+                    ),
+                  ),
+                  const SizedBox(width: 12),
+                  for (var i = 0; i < _kTextStyles.length; i++)
+                    GestureDetector(
+                      onTap: () => setState(() => _styleIdx = i),
+                      child: Container(
+                        margin: const EdgeInsets.only(right: 8),
+                        padding: const EdgeInsets.symmetric(
+                            horizontal: 10, vertical: 6),
+                        decoration: BoxDecoration(
+                          color: _kTextStyles[i].bgColor,
+                          borderRadius: BorderRadius.circular(6),
+                          border: Border.all(
+                            color: _styleIdx == i
+                                ? Colors.white
+                                : Colors.transparent,
+                            width: 2,
+                          ),
+                        ),
+                        child: Text(
+                          'Aa',
+                          style: BgFonts.display(
+                            size: 13,
+                            weight: FontWeight.w800,
+                            color: _kTextStyles[i].textColor,
+                          ),
+                        ),
+                      ),
+                    ),
+                ],
+              ),
+              const SizedBox(height: 14),
+              Row(
+                children: [
+                  Text(
+                    l.pick('Taille', 'Size').toUpperCase(),
+                    style: BgFonts.body(
+                      size: 10,
+                      weight: FontWeight.w700,
+                      color: Colors.white.withValues(alpha: 0.7),
+                      letterSpacing: 0.4,
+                    ),
+                  ),
+                  Expanded(
+                    child: Slider(
+                      value: _fontSize,
+                      min: 14,
+                      max: 48,
+                      onChanged: (v) => setState(() => _fontSize = v),
+                      activeColor: const Color(0xFFF37221),
+                    ),
+                  ),
+                  Text(
+                    _fontSize.toStringAsFixed(0),
+                    style: BgFonts.body(
+                      size: 11,
+                      weight: FontWeight.w700,
+                      color: Colors.white,
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 8),
+              Row(
+                children: [
+                  Expanded(
+                    child: GestureDetector(
+                      onTap: () => Navigator.of(context).pop(),
+                      child: Container(
+                        padding: const EdgeInsets.symmetric(vertical: 12),
+                        alignment: Alignment.center,
+                        decoration: BoxDecoration(
+                          color: Colors.white.withValues(alpha: 0.08),
+                          borderRadius: BorderRadius.circular(12),
+                        ),
+                        child: Text(
+                          l.cancel,
+                          style: BgFonts.body(
+                            size: 13,
+                            weight: FontWeight.w700,
+                            color: Colors.white,
+                          ),
+                        ),
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: 10),
+                  Expanded(
+                    child: GestureDetector(
+                      onTap: _submit,
+                      child: Container(
+                        padding: const EdgeInsets.symmetric(vertical: 12),
+                        alignment: Alignment.center,
+                        decoration: BoxDecoration(
+                          color: const Color(0xFFF37221),
+                          borderRadius: BorderRadius.circular(12),
+                        ),
+                        child: Text(
+                          l.pick('Ajouter', 'Add'),
+                          style: BgFonts.body(
+                            size: 13,
+                            weight: FontWeight.w700,
+                            color: Colors.white,
+                          ),
+                        ),
+                      ),
+                    ),
+                  ),
+                ],
+              ),
             ],
-          );
-        }).toList(growable: false),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+const List<String> _kStickers = [
+  '🔥', '😋', '😍', '🤤', '👌', '👍', '👏', '🌶️',
+  '🍗', '🍖', '🍤', '🐟', '🥘', '🍲', '🍛', '🥗',
+  '🍕', '🍔', '🍟', '🌮', '🌯', '🥙', '🧆', '🍱',
+  '🍣', '🍜', '🍝', '🍞', '🥖', '🧀', '🍰', '🍩',
+  '🍦', '🍪', '🥥', '🍌', '🥭', '🍍', '🍓', '🍇',
+  '☕', '🍵', '🥤', '🍺', '🍷', '🥂', '🍾', '🥑',
+  '⭐', '✨', '💯', '🎉', '❤️', '🧡', '💛', '💚',
+];
+
+class _StickerPicker extends StatelessWidget {
+  const _StickerPicker();
+
+  @override
+  Widget build(BuildContext context) {
+    final l = L(AppScope.of(context).lang);
+    return SafeArea(
+      top: false,
+      child: Container(
+        padding: const EdgeInsets.fromLTRB(16, 12, 16, 16),
+        constraints: BoxConstraints(
+          maxHeight: MediaQuery.of(context).size.height * 0.5,
+        ),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Container(
+              width: 40,
+              height: 4,
+              decoration: BoxDecoration(
+                color: Colors.white.withValues(alpha: 0.2),
+                borderRadius: BorderRadius.circular(2),
+              ),
+            ),
+            const SizedBox(height: 12),
+            Align(
+              alignment: Alignment.centerLeft,
+              child: Text(
+                l.pick('Stickers', 'Stickers').toUpperCase(),
+                style: BgFonts.body(
+                  size: 11,
+                  weight: FontWeight.w700,
+                  color: Colors.white.withValues(alpha: 0.7),
+                  letterSpacing: 0.5,
+                ),
+              ),
+            ),
+            const SizedBox(height: 10),
+            Expanded(
+              child: GridView.builder(
+                gridDelegate:
+                    const SliverGridDelegateWithFixedCrossAxisCount(
+                        crossAxisCount: 6),
+                itemCount: _kStickers.length,
+                itemBuilder: (_, i) {
+                  return GestureDetector(
+                    onTap: () => Navigator.of(context).pop(_kStickers[i]),
+                    behavior: HitTestBehavior.opaque,
+                    child: Center(
+                      child: Text(
+                        _kStickers[i],
+                        style: const TextStyle(fontSize: 30),
+                      ),
+                    ),
+                  );
+                },
+              ),
+            ),
+          ],
+        ),
       ),
     );
   }
