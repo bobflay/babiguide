@@ -3,8 +3,7 @@ import 'dart:async';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
-import 'package:media_kit/media_kit.dart';
-import 'package:media_kit_video/media_kit_video.dart';
+import 'package:video_player/video_player.dart';
 
 import '../api/api_error.dart';
 import '../api/feed_api.dart';
@@ -15,6 +14,20 @@ import '../widgets/photo_placeholder.dart';
 
 const int _kPageLimit = 10;
 const int _kPrefetchThreshold = 3;
+
+/// One slot in the feed's controller cache. The parent (`_ForYouScreenState`)
+/// keeps a sliding window of [idx-1, idx, idx+1] so the next video is fully
+/// initialized (and has decoded frames buffered) by the time the user swipes.
+class _CachedVideo {
+  _CachedVideo({required this.index, required this.url});
+  final int index;
+  final String url;
+  VideoPlayerController? controller;
+  VoidCallback? listener;
+  bool initializing = false;
+  bool ready = false;
+  bool failed = false;
+}
 
 class ForYouScreen extends StatefulWidget {
   // Kept for compatibility with the existing main.dart routing; the comments
@@ -38,6 +51,8 @@ class _ForYouScreenState extends State<ForYouScreen> {
   late final PageController _pc = PageController();
   final List<FeedVideo> _items = [];
   final Set<String> _seenInCurrentCycle = {};
+  final Map<int, _CachedVideo> _cache = {};
+  Timer? _activeFailureTimer;
   int _idx = 0;
   String? _nextCursor;
   bool _loadingInitial = true;
@@ -56,6 +71,11 @@ class _ForYouScreenState extends State<ForYouScreen> {
 
   @override
   void dispose() {
+    _activeFailureTimer?.cancel();
+    for (final e in _cache.values) {
+      _disposeEntry(e);
+    }
+    _cache.clear();
     _pc.dispose();
     super.dispose();
   }
@@ -71,6 +91,10 @@ class _ForYouScreenState extends State<ForYouScreen> {
       final page = await api.getVideos(page: 1, limit: _kPageLimit);
       if (!mounted) return;
       setState(() {
+        for (final e in _cache.values) {
+          _disposeEntry(e);
+        }
+        _cache.clear();
         _items.clear();
         _seenInCurrentCycle.clear();
         for (final v in page.items) {
@@ -80,6 +104,7 @@ class _ForYouScreenState extends State<ForYouScreen> {
         _idx = 0;
         _loadingInitial = false;
       });
+      _ensureCacheForIndex(_idx);
     } catch (e) {
       if (!mounted) return;
       setState(() {
@@ -120,6 +145,7 @@ class _ForYouScreenState extends State<ForYouScreen> {
         _nextCursor = page.nextCursor;
         _loadingMore = false;
       });
+      _ensureCacheForIndex(_idx);
     } catch (e) {
       if (!mounted) return;
       setState(() {
@@ -130,7 +156,23 @@ class _ForYouScreenState extends State<ForYouScreen> {
   }
 
   void _onPageChanged(int i) {
+    // Pause + rewind the previously active controller so the user sees a fresh
+    // start when they swipe back. This must run before _idx is updated so the
+    // lookup hits the outgoing slot.
+    final outgoing = _cache[_idx]?.controller;
+    if (outgoing != null) {
+      outgoing.pause();
+      outgoing.seekTo(Duration.zero);
+    }
     setState(() => _idx = i);
+    _ensureCacheForIndex(i);
+    // If the incoming controller is already initialized (preloaded), start it
+    // right away. Otherwise _initEntry will start it on completion.
+    final incoming = _cache[i];
+    if (incoming != null && incoming.ready && incoming.controller != null) {
+      incoming.controller!.play();
+    }
+    _checkActiveFailureSkip();
     if (_items.isNotEmpty &&
         i >= _items.length - _kPrefetchThreshold &&
         !_loadingMore) {
@@ -140,6 +182,10 @@ class _ForYouScreenState extends State<ForYouScreen> {
 
   void _toggleMute() {
     setState(() => _muted = !_muted);
+    final v = _muted ? 0.0 : 1.0;
+    for (final e in _cache.values) {
+      e.controller?.setVolume(v);
+    }
   }
 
   Future<void> _share(FeedVideo v) async {
@@ -180,26 +226,120 @@ class _ForYouScreenState extends State<ForYouScreen> {
     if (v.author.isPlace) _openPlace(v);
   }
 
-  void _onPlaybackFailed(int forIndex) {
-    if (!mounted) return;
-    if (forIndex != _idx) return;
-    if (_idx >= _items.length - 1) return;
-    _pc.animateToPage(
-      _idx + 1,
-      duration: const Duration(milliseconds: 280),
-      curve: Curves.easeInOut,
-    );
+  // ---------------- Controller cache (preloads idx-1, idx, idx+1) ----------------
+
+  void _ensureCacheForIndex(int idx) {
+    if (_items.isEmpty) return;
+    final keep = <int>{};
+    for (var i = idx - 1; i <= idx + 1; i++) {
+      if (i < 0 || i >= _items.length) continue;
+      keep.add(i);
+      if (!_cache.containsKey(i)) {
+        final entry = _CachedVideo(index: i, url: _items[i].url);
+        _cache[i] = entry;
+        _initEntry(entry);
+      }
+    }
+    final toRemove = _cache.keys.where((k) => !keep.contains(k)).toList();
+    for (final k in toRemove) {
+      _disposeEntry(_cache[k]!);
+      _cache.remove(k);
+    }
   }
 
-  void _onCompleted(int forIndex) {
-    if (!mounted) return;
-    if (forIndex != _idx) return;
+  Future<void> _initEntry(_CachedVideo entry) async {
+    if (entry.url.isEmpty) {
+      entry.failed = true;
+      if (entry.index == _idx) _checkActiveFailureSkip();
+      return;
+    }
+    entry.initializing = true;
+    try {
+      final c = VideoPlayerController.networkUrl(Uri.parse(entry.url));
+      await c.initialize();
+      // Window may have shifted while we awaited the network round-trip — if
+      // this entry is no longer the live one for its slot, dispose silently.
+      if (!mounted || _cache[entry.index] != entry) {
+        await c.dispose();
+        return;
+      }
+      void listener() => _onControllerUpdate(entry.index);
+      c.addListener(listener);
+      await c.setVolume(_muted ? 0 : 1);
+      entry.controller = c;
+      entry.listener = listener;
+      entry.ready = true;
+      entry.initializing = false;
+      if (entry.index == _idx) {
+        await c.play();
+      }
+      if (mounted) setState(() {});
+    } catch (e) {
+      if (kDebugMode) {
+        debugPrint('[Feed] init failed idx=${entry.index}: $e');
+      }
+      entry.failed = true;
+      entry.initializing = false;
+      if (mounted) {
+        setState(() {});
+        if (entry.index == _idx) _checkActiveFailureSkip();
+      }
+    }
+  }
+
+  void _onControllerUpdate(int index) {
+    final entry = _cache[index];
+    final c = entry?.controller;
+    if (entry == null || c == null || !mounted) return;
+    final value = c.value;
+    if (value.hasError) {
+      if (kDebugMode) {
+        debugPrint(
+            '[Feed] playback error idx=$index: ${value.errorDescription}');
+      }
+      if (!entry.failed) {
+        entry.failed = true;
+        if (index == _idx) _checkActiveFailureSkip();
+      }
+      return;
+    }
+    final dur = value.duration;
+    if (dur > Duration.zero &&
+        !value.isPlaying &&
+        value.position >= dur - const Duration(milliseconds: 250)) {
+      if (index == _idx && _idx < _items.length - 1) {
+        _pc.animateToPage(
+          _idx + 1,
+          duration: const Duration(milliseconds: 320),
+          curve: Curves.easeInOut,
+        );
+      }
+    }
+  }
+
+  void _checkActiveFailureSkip() {
+    _activeFailureTimer?.cancel();
+    if (_idx >= _items.length) return;
+    final entry = _cache[_idx];
+    if (entry?.failed != true) return;
     if (_idx >= _items.length - 1) return;
-    _pc.animateToPage(
-      _idx + 1,
-      duration: const Duration(milliseconds: 320),
-      curve: Curves.easeInOut,
-    );
+    _activeFailureTimer = Timer(const Duration(seconds: 2), () {
+      if (!mounted || _idx >= _items.length - 1) return;
+      _pc.animateToPage(
+        _idx + 1,
+        duration: const Duration(milliseconds: 280),
+        curve: Curves.easeInOut,
+      );
+    });
+  }
+
+  void _disposeEntry(_CachedVideo e) {
+    final l = e.listener;
+    final c = e.controller;
+    if (l != null && c != null) c.removeListener(l);
+    c?.dispose();
+    e.controller = null;
+    e.listener = null;
   }
 
   @override
@@ -240,20 +380,23 @@ class _ForYouScreenState extends State<ForYouScreen> {
             scrollDirection: Axis.vertical,
             itemCount: _items.length,
             onPageChanged: _onPageChanged,
-            itemBuilder: (_, i) => _FeedVideoCard(
-              key: ValueKey('feed_${i}_${_items[i].id}'),
-              video: _items[i],
-              isActive: i == _idx,
-              muted: _muted,
-              palette: p,
-              l: l,
-              onTap: _toggleMute,
-              onAuthorTap: () => _onAuthorTap(_items[i]),
-              onPlaceTap: () => _openPlace(_items[i]),
-              onShareTap: () => _share(_items[i]),
-              onPlaybackFailed: () => _onPlaybackFailed(i),
-              onCompleted: () => _onCompleted(i),
-            ),
+            itemBuilder: (_, i) {
+              final entry = _cache[i];
+              final readyController =
+                  (entry != null && entry.ready) ? entry.controller : null;
+              return _FeedVideoCard(
+                key: ValueKey('feed_${i}_${_items[i].id}'),
+                video: _items[i],
+                controller: readyController,
+                muted: _muted,
+                palette: p,
+                l: l,
+                onTap: _toggleMute,
+                onAuthorTap: () => _onAuthorTap(_items[i]),
+                onPlaceTap: () => _openPlace(_items[i]),
+                onShareTap: () => _share(_items[i]),
+              );
+            },
           ),
           _TopBar(l: l, onOpenMap: widget.onOpenMap),
           if (_paginationError != null && !_loadingMore)
@@ -382,9 +525,9 @@ class _TopBar extends StatelessWidget {
 
 // ----------------------------- Single feed card ------------------------------
 
-class _FeedVideoCard extends StatefulWidget {
+class _FeedVideoCard extends StatelessWidget {
   final FeedVideo video;
-  final bool isActive;
+  final VideoPlayerController? controller;
   final bool muted;
   final BgPalette palette;
   final L l;
@@ -392,13 +535,11 @@ class _FeedVideoCard extends StatefulWidget {
   final VoidCallback? onAuthorTap;
   final VoidCallback? onPlaceTap;
   final VoidCallback? onShareTap;
-  final VoidCallback? onPlaybackFailed;
-  final VoidCallback? onCompleted;
 
   const _FeedVideoCard({
     super.key,
     required this.video,
-    required this.isActive,
+    required this.controller,
     required this.muted,
     required this.palette,
     required this.l,
@@ -406,131 +547,35 @@ class _FeedVideoCard extends StatefulWidget {
     this.onAuthorTap,
     this.onPlaceTap,
     this.onShareTap,
-    this.onPlaybackFailed,
-    this.onCompleted,
   });
 
   @override
-  State<_FeedVideoCard> createState() => _FeedVideoCardState();
-}
-
-class _FeedVideoCardState extends State<_FeedVideoCard> {
-  Player? _player;
-  VideoController? _controller;
-  StreamSubscription<String>? _errorSub;
-  StreamSubscription<bool>? _completedSub;
-  bool _ready = false;
-  bool _failed = false;
-  Timer? _failTimer;
-
-  @override
-  void initState() {
-    super.initState();
-    _initPlayer();
-  }
-
-  @override
-  void didUpdateWidget(covariant _FeedVideoCard old) {
-    super.didUpdateWidget(old);
-    if (old.isActive != widget.isActive) {
-      _applyPlayState();
-    }
-    if (old.muted != widget.muted) {
-      _player?.setVolume(widget.muted ? 0 : 100);
-    }
-  }
-
-  @override
-  void dispose() {
-    _failTimer?.cancel();
-    _errorSub?.cancel();
-    _completedSub?.cancel();
-    _player?.dispose();
-    super.dispose();
-  }
-
-  Future<void> _initPlayer() async {
-    final url = widget.video.url;
-    if (url.isEmpty) {
-      _scheduleFailoverSkip();
-      return;
-    }
-    try {
-      final player = Player();
-      final controller = VideoController(player);
-      await player.setPlaylistMode(PlaylistMode.none);
-      await player.setVolume(widget.muted ? 0 : 100);
-      _errorSub = player.stream.error.listen((err) {
-        if (kDebugMode) {
-          debugPrint('[Feed] playback error id=${widget.video.id}: $err');
-        }
-        _scheduleFailoverSkip();
-      });
-      _completedSub = player.stream.completed.listen((done) {
-        if (!mounted || !done) return;
-        if (widget.isActive) widget.onCompleted?.call();
-      });
-      await player.open(Media(url), play: widget.isActive);
-      if (!mounted) {
-        await player.dispose();
-        return;
-      }
-      setState(() {
-        _player = player;
-        _controller = controller;
-        _ready = true;
-      });
-    } catch (e) {
-      if (kDebugMode) {
-        debugPrint('[Feed] init failed id=${widget.video.id}: $e');
-      }
-      if (!mounted) return;
-      _scheduleFailoverSkip();
-    }
-  }
-
-  void _scheduleFailoverSkip() {
-    if (_failed) return;
-    _failed = true;
-    _failTimer?.cancel();
-    _failTimer = Timer(const Duration(seconds: 2), () {
-      if (!mounted) return;
-      widget.onPlaybackFailed?.call();
-    });
-  }
-
-  void _applyPlayState() {
-    final p = _player;
-    if (p == null) return;
-    if (widget.isActive) {
-      p.play();
-    } else {
-      p.pause();
-      p.seek(Duration.zero);
-    }
-  }
-
-  @override
   Widget build(BuildContext context) {
-    final v = widget.video;
+    final v = video;
+    final c = controller;
+    final ready = c != null && c.value.isInitialized;
     return Stack(
       fit: StackFit.expand,
       children: [
         // Poster (always rendered as backdrop until video has frames)
         Positioned.fill(child: _Poster(video: v)),
-        if (_ready && _controller != null)
+        if (ready)
           Positioned.fill(
-            child: Video(
-              controller: _controller!,
-              controls: NoVideoControls,
+            child: FittedBox(
               fit: BoxFit.cover,
+              clipBehavior: Clip.hardEdge,
+              child: SizedBox(
+                width: c.value.size.width,
+                height: c.value.size.height,
+                child: VideoPlayer(c),
+              ),
             ),
           ),
         // Tap-to-mute / double-tap stub
         Positioned.fill(
           child: GestureDetector(
             behavior: HitTestBehavior.opaque,
-            onTap: widget.onTap,
+            onTap: onTap,
             // Reserved for future "like" — intentionally a no-op stub.
             onDoubleTap: () {},
             child: const SizedBox.expand(),
@@ -572,7 +617,7 @@ class _FeedVideoCardState extends State<_FeedVideoCard> {
                 ),
                 alignment: Alignment.center,
                 child: Icon(
-                  widget.muted ? Icons.volume_off : Icons.volume_up,
+                  muted ? Icons.volume_off : Icons.volume_up,
                   color: Colors.white,
                   size: 16,
                 ),
@@ -589,8 +634,8 @@ class _FeedVideoCardState extends State<_FeedVideoCard> {
             children: [
               _AuthorAvatar(
                 author: v.author,
-                palette: widget.palette,
-                onTap: widget.onAuthorTap,
+                palette: palette,
+                onTap: onAuthorTap,
               ),
               const SizedBox(height: 18),
               _ActionButton(
@@ -602,7 +647,7 @@ class _FeedVideoCardState extends State<_FeedVideoCard> {
               _ActionButton(
                 icon: const Icon(Icons.ios_share,
                     color: Colors.white, size: 22),
-                onTap: widget.onShareTap,
+                onTap: onShareTap,
               ),
             ],
           ),
@@ -614,10 +659,10 @@ class _FeedVideoCardState extends State<_FeedVideoCard> {
           bottom: 100,
           child: _BottomInfo(
             video: v,
-            l: widget.l,
-            palette: widget.palette,
-            onAuthorTap: widget.onAuthorTap,
-            onPlaceTap: widget.onPlaceTap,
+            l: l,
+            palette: palette,
+            onAuthorTap: onAuthorTap,
+            onPlaceTap: onPlaceTap,
           ),
         ),
       ],

@@ -1,6 +1,5 @@
 import 'package:flutter/material.dart';
-import 'package:media_kit/media_kit.dart';
-import 'package:media_kit_video/media_kit_video.dart';
+import 'package:video_player/video_player.dart';
 
 class BgVideoPlayer extends StatefulWidget {
   final String url;
@@ -23,9 +22,8 @@ class BgVideoPlayer extends StatefulWidget {
 }
 
 class _BgVideoPlayerState extends State<BgVideoPlayer> {
-  Player? _player;
-  VideoController? _controller;
-  bool _started = false;
+  VideoPlayerController? _controller;
+  bool _ready = false;
   bool _initializing = false;
   Object? _error;
 
@@ -37,28 +35,27 @@ class _BgVideoPlayerState extends State<BgVideoPlayer> {
 
   @override
   void dispose() {
-    _player?.dispose();
+    _controller?.dispose();
     super.dispose();
   }
 
   Future<void> _start() async {
-    if (_initializing || _started) return;
+    if (_initializing || _ready) return;
     setState(() {
       _initializing = true;
       _error = null;
     });
     try {
-      final player = Player();
-      final controller = VideoController(player);
-      await player.open(Media(widget.url));
+      final controller = VideoPlayerController.networkUrl(Uri.parse(widget.url));
+      await controller.initialize();
       if (!mounted) {
-        await player.dispose();
+        await controller.dispose();
         return;
       }
+      await controller.play();
       setState(() {
-        _player = player;
         _controller = controller;
-        _started = true;
+        _ready = true;
         _initializing = false;
       });
     } catch (e) {
@@ -77,14 +74,16 @@ class _BgVideoPlayerState extends State<BgVideoPlayer> {
 
   @override
   Widget build(BuildContext context) {
-    if (_started && _controller != null) {
+    if (_ready && _controller != null) {
       return _wrap(
         Container(
           color: Colors.black,
-          child: Video(
-            controller: _controller!,
-            controls: AdaptiveVideoControls,
-            fit: widget.fit,
+          alignment: Alignment.center,
+          child: AspectRatio(
+            aspectRatio: _controller!.value.aspectRatio == 0
+                ? 9 / 16
+                : _controller!.value.aspectRatio,
+            child: VideoPlayer(_controller!),
           ),
         ),
       );
