@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_map/flutter_map.dart';
 import 'package:latlong2/latlong.dart' hide Path;
@@ -9,13 +11,15 @@ import '../i18n.dart';
 import '../theme.dart';
 import '../widgets/photo_placeholder.dart';
 
-// Bounding box covering greater Abidjan; used to fetch markers and as the
-// initial camera target for the FlutterMap viewport.
-const double _swLat = 5.30;
-const double _swLng = -4.10;
-const double _neLat = 5.45;
-const double _neLng = -3.85;
 const LatLng _abidjanCenter = LatLng(5.36, -4.00);
+const double _initialZoom = 12;
+// Initial bbox used for the very first fetch (before the map has reported its
+// real bounds). Roughly matches the camera at _abidjanCenter, zoom 12.
+const double _initialSwLat = 5.30;
+const double _initialSwLng = -4.10;
+const double _initialNeLat = 5.45;
+const double _initialNeLng = -3.85;
+const Duration _refetchDebounce = Duration(milliseconds: 350);
 
 class MapScreen extends StatefulWidget {
   final VoidCallback? onBack;
@@ -28,28 +32,122 @@ class MapScreen extends StatefulWidget {
 }
 
 class _MapScreenState extends State<MapScreen> {
-  Future<MapMarkers>? _future;
   String? _selectedId;
   final MapController _controller = MapController();
+
+  Timer? _debounce;
+  int _requestId = 0;
+
+  bool _loading = false;
+  Object? _error;
+  MapMarkers? _data;
 
   @override
   void initState() {
     super.initState();
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      _load();
+      _fetch(
+        swLat: _initialSwLat,
+        swLng: _initialSwLng,
+        neLat: _initialNeLat,
+        neLng: _initialNeLng,
+        zoom: _initialZoom,
+      );
     });
   }
 
-  void _load() {
-    final api = AppScope.of(context).placesApi;
-    setState(() {
-      _future = api.getMarkers(
-        swLat: _swLat,
-        swLng: _swLng,
-        neLat: _neLat,
-        neLng: _neLng,
+  @override
+  void dispose() {
+    _debounce?.cancel();
+    super.dispose();
+  }
+
+  void _onPositionChanged(MapCamera camera, bool hasGesture) {
+    if (!hasGesture) return;
+    _debounce?.cancel();
+    _debounce = Timer(_refetchDebounce, () {
+      if (!mounted) return;
+      final b = camera.visibleBounds;
+      _fetch(
+        swLat: b.southWest.latitude,
+        swLng: b.southWest.longitude,
+        neLat: b.northEast.latitude,
+        neLng: b.northEast.longitude,
+        zoom: camera.zoom,
       );
     });
+  }
+
+  Future<void> _fetch({
+    required double swLat,
+    required double swLng,
+    required double neLat,
+    required double neLng,
+    required double zoom,
+  }) async {
+    final api = AppScope.of(context).placesApi;
+    final id = ++_requestId;
+    setState(() {
+      _loading = true;
+      _error = null;
+    });
+    try {
+      final result = await api.getMarkers(
+        swLat: swLat,
+        swLng: swLng,
+        neLat: neLat,
+        neLng: neLng,
+        zoom: zoom,
+      );
+      if (!mounted || id != _requestId) return;
+      setState(() {
+        _data = result;
+        _loading = false;
+        if (_selectedId != null &&
+            !result.markers.any((m) => m.id == _selectedId)) {
+          _selectedId = null;
+        }
+      });
+    } catch (e) {
+      if (!mounted || id != _requestId) return;
+      setState(() {
+        _error = e;
+        _loading = false;
+      });
+    }
+  }
+
+  void _onClusterTap(MapCluster c) {
+    if (c.hasBbox) {
+      final bounds = LatLngBounds(
+        LatLng(c.swLat!, c.swLng!),
+        LatLng(c.neLat!, c.neLng!),
+      );
+      _controller.fitCamera(
+        CameraFit.bounds(
+          bounds: bounds,
+          padding: const EdgeInsets.all(48),
+        ),
+      );
+      _fetch(
+        swLat: c.swLat!,
+        swLng: c.swLng!,
+        neLat: c.neLat!,
+        neLng: c.neLng!,
+        zoom: _controller.camera.zoom,
+      );
+    } else {
+      final newZoom = (_controller.camera.zoom + 2).clamp(10.0, 18.0);
+      _controller.move(LatLng(c.lat, c.lng), newZoom);
+      final b = _controller.camera.visibleBounds;
+      _fetch(
+        swLat: b.southWest.latitude,
+        swLng: b.southWest.longitude,
+        neLat: b.northEast.latitude,
+        neLng: b.northEast.longitude,
+        zoom: newZoom,
+      );
+    }
   }
 
   @override
@@ -58,68 +156,77 @@ class _MapScreenState extends State<MapScreen> {
     final p = state.palette;
     final l = L(state.lang);
 
+    final markers = _data?.markers ?? const <MapMarker>[];
+    final clusters = _data?.clusters ?? const <MapCluster>[];
+    final truncated = _data?.truncated ?? false;
+
     return Stack(
       children: [
         Positioned.fill(
-          child: FutureBuilder<MapMarkers>(
-            future: _future,
-            builder: (context, snap) {
-              final markers = snap.data?.markers ?? const <MapMarker>[];
-              return FlutterMap(
-                mapController: _controller,
-                options: const MapOptions(
-                  initialCenter: _abidjanCenter,
-                  initialZoom: 12,
-                  minZoom: 10,
-                  maxZoom: 18,
-                ),
-                children: [
-                  TileLayer(
-                    urlTemplate:
-                        'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
-                    userAgentPackageName: 'app.babiguide.mobile',
-                  ),
-                  MarkerLayer(
-                    markers: [
-                      Marker(
-                        point: _abidjanCenter,
-                        width: 80,
-                        height: 80,
-                        child: IgnorePointer(
-                          child: Container(
-                            decoration: BoxDecoration(
-                              shape: BoxShape.circle,
-                              gradient: RadialGradient(
-                                colors: [
-                                  p.green.withValues(alpha: 0.35),
-                                  p.green.withValues(alpha: 0),
-                                ],
-                                stops: const [0.0, 0.7],
-                              ),
-                            ),
+          child: FlutterMap(
+            mapController: _controller,
+            options: MapOptions(
+              initialCenter: _abidjanCenter,
+              initialZoom: _initialZoom,
+              minZoom: 10,
+              maxZoom: 18,
+              onPositionChanged: _onPositionChanged,
+            ),
+            children: [
+              TileLayer(
+                urlTemplate:
+                    'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
+                userAgentPackageName: 'app.babiguide.mobile',
+              ),
+              MarkerLayer(
+                markers: [
+                  Marker(
+                    point: _abidjanCenter,
+                    width: 80,
+                    height: 80,
+                    child: IgnorePointer(
+                      child: Container(
+                        decoration: BoxDecoration(
+                          shape: BoxShape.circle,
+                          gradient: RadialGradient(
+                            colors: [
+                              p.green.withValues(alpha: 0.35),
+                              p.green.withValues(alpha: 0),
+                            ],
+                            stops: const [0.0, 0.7],
                           ),
                         ),
                       ),
-                      for (final m in markers)
-                        Marker(
-                          point: LatLng(m.lat, m.lng),
-                          width: 56,
-                          height: 56,
-                          alignment: Alignment.topCenter,
-                          child: _Pin(
-                            label: m.rating.toStringAsFixed(1),
-                            big: m.id == _selectedId || m.sponsored,
-                            onTap: () {
-                              setState(() => _selectedId = m.id);
-                              _controller.move(LatLng(m.lat, m.lng), 15);
-                            },
-                          ),
-                        ),
-                    ],
+                    ),
                   ),
+                  for (final m in markers)
+                    Marker(
+                      point: LatLng(m.lat, m.lng),
+                      width: 56,
+                      height: 56,
+                      alignment: Alignment.topCenter,
+                      child: _Pin(
+                        label: m.rating.toStringAsFixed(1),
+                        big: m.id == _selectedId || m.sponsored,
+                        onTap: () {
+                          setState(() => _selectedId = m.id);
+                          _controller.move(LatLng(m.lat, m.lng), 15);
+                        },
+                      ),
+                    ),
+                  for (final c in clusters)
+                    Marker(
+                      point: LatLng(c.lat, c.lng),
+                      width: 52,
+                      height: 52,
+                      child: _ClusterPin(
+                        count: c.count,
+                        onTap: () => _onClusterTap(c),
+                      ),
+                    ),
                 ],
-              );
-            },
+              ),
+            ],
           ),
         ),
         Positioned(
@@ -182,115 +289,137 @@ class _MapScreenState extends State<MapScreen> {
             ],
           ),
         ),
-        FutureBuilder<MapMarkers>(
-          future: _future,
-          builder: (context, snap) {
-            if (snap.connectionState == ConnectionState.waiting) {
-              return const Positioned(
-                bottom: 200,
-                left: 0,
-                right: 0,
-                child: Center(
-                  child: SizedBox(
-                    width: 28,
-                    height: 28,
-                    child: CircularProgressIndicator(strokeWidth: 2),
-                  ),
-                ),
-              );
-            }
-            if (snap.hasError) {
-              final msg = snap.error is ApiError
-                  ? (snap.error as ApiError).message
-                  : l.pick('Erreur de carte', 'Map failed to load');
-              return Positioned(
-                bottom: 100,
-                left: 16,
-                right: 16,
-                child: Container(
-                  padding: const EdgeInsets.all(12),
-                  decoration: BoxDecoration(
-                    color: Colors.white.withValues(alpha: 0.95),
-                    borderRadius: BorderRadius.circular(12),
-                  ),
-                  child: Text(msg,
-                      style: BgFonts.body(size: 12, color: p.ink)),
-                ),
-              );
-            }
-            final markers = snap.data?.markers ?? const <MapMarker>[];
-            if (markers.isEmpty) return const SizedBox.shrink();
-            final selected = _selectedId == null
-                ? null
-                : markers.where((m) => m.id == _selectedId).firstOrNull;
-            if (selected != null) {
-              return Positioned(
-                bottom: 90,
-                left: 16,
-                right: 16,
-                child: Row(
-                  children: [
-                    Expanded(
-                      child: GestureDetector(
-                        onTap: () =>
-                            widget.onOpenRestaurant?.call(selected.id),
-                        child: _MarkerCard(m: selected, l: l, p: p),
-                      ),
-                    ),
-                    const SizedBox(width: 8),
-                    GestureDetector(
-                      onTap: () => setState(() => _selectedId = null),
-                      child: Container(
-                        width: 36,
-                        height: 36,
-                        decoration: BoxDecoration(
-                          color: Colors.white.withValues(alpha: 0.95),
-                          shape: BoxShape.circle,
-                          boxShadow: [
-                            BoxShadow(
-                              color: Colors.black.withValues(alpha: 0.2),
-                              blurRadius: 18,
-                              offset: const Offset(0, 6),
-                              spreadRadius: -8,
-                            ),
-                          ],
-                        ),
-                        child: Icon(Icons.close,
-                            size: 18, color: p.ink),
-                      ),
+        if (_loading && _data == null)
+          const Positioned(
+            bottom: 200,
+            left: 0,
+            right: 0,
+            child: Center(
+              child: SizedBox(
+                width: 28,
+                height: 28,
+                child: CircularProgressIndicator(strokeWidth: 2),
+              ),
+            ),
+          ),
+        if (_loading && _data != null)
+          const Positioned(
+            top: 110,
+            right: 16,
+            child: SizedBox(
+              width: 18,
+              height: 18,
+              child: CircularProgressIndicator(strokeWidth: 2),
+            ),
+          ),
+        if (truncated)
+          Positioned(
+            top: 104,
+            left: 16,
+            right: 56,
+            child: Container(
+              padding:
+                  const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+              decoration: BoxDecoration(
+                color: Colors.white.withValues(alpha: 0.95),
+                borderRadius: BorderRadius.circular(999),
+              ),
+              child: Text(
+                l.pick('Zoomez pour tout voir', 'Zoom in to see all'),
+                style: BgFonts.body(size: 11, color: p.ink),
+              ),
+            ),
+          ),
+        if (_error != null && _data == null)
+          Positioned(
+            bottom: 100,
+            left: 16,
+            right: 16,
+            child: Container(
+              padding: const EdgeInsets.all(12),
+              decoration: BoxDecoration(
+                color: Colors.white.withValues(alpha: 0.95),
+                borderRadius: BorderRadius.circular(12),
+              ),
+              child: Text(
+                _error is ApiError
+                    ? (_error as ApiError).message
+                    : l.pick('Erreur de carte', 'Map failed to load'),
+                style: BgFonts.body(size: 12, color: p.ink),
+              ),
+            ),
+          ),
+        if (markers.isNotEmpty) _buildBottomCards(markers, l, p),
+      ],
+    );
+  }
+
+  Widget _buildBottomCards(List<MapMarker> markers, L l, BgPalette p) {
+    final selected = _selectedId == null
+        ? null
+        : markers.where((m) => m.id == _selectedId).firstOrNull;
+    if (selected != null) {
+      return Positioned(
+        bottom: 90,
+        left: 16,
+        right: 16,
+        child: Row(
+          children: [
+            Expanded(
+              child: GestureDetector(
+                onTap: () => widget.onOpenRestaurant?.call(selected.id),
+                child: _MarkerCard(m: selected, l: l, p: p),
+              ),
+            ),
+            const SizedBox(width: 8),
+            GestureDetector(
+              onTap: () => setState(() => _selectedId = null),
+              child: Container(
+                width: 36,
+                height: 36,
+                decoration: BoxDecoration(
+                  color: Colors.white.withValues(alpha: 0.95),
+                  shape: BoxShape.circle,
+                  boxShadow: [
+                    BoxShadow(
+                      color: Colors.black.withValues(alpha: 0.2),
+                      blurRadius: 18,
+                      offset: const Offset(0, 6),
+                      spreadRadius: -8,
                     ),
                   ],
                 ),
-              );
-            }
-            return Positioned(
-              bottom: 90,
-              left: 0,
-              right: 0,
-              child: SizedBox(
-                height: 100,
-                child: ListView.separated(
-                  scrollDirection: Axis.horizontal,
-                  padding: const EdgeInsets.symmetric(horizontal: 16),
-                  itemCount: markers.length.clamp(0, 12),
-                  separatorBuilder: (_, _) => const SizedBox(width: 12),
-                  itemBuilder: (_, i) {
-                    final m = markers[i];
-                    return GestureDetector(
-                      onTap: () {
-                        setState(() => _selectedId = m.id);
-                        _controller.move(LatLng(m.lat, m.lng), 15);
-                        widget.onOpenRestaurant?.call(m.id);
-                      },
-                      child: _MarkerCard(m: m, l: l, p: p),
-                    );
-                  },
-                ),
+                child: Icon(Icons.close, size: 18, color: p.ink),
               ),
+            ),
+          ],
+        ),
+      );
+    }
+    return Positioned(
+      bottom: 90,
+      left: 0,
+      right: 0,
+      child: SizedBox(
+        height: 100,
+        child: ListView.separated(
+          scrollDirection: Axis.horizontal,
+          padding: const EdgeInsets.symmetric(horizontal: 16),
+          itemCount: markers.length.clamp(0, 12),
+          separatorBuilder: (_, _) => const SizedBox(width: 12),
+          itemBuilder: (_, i) {
+            final m = markers[i];
+            return GestureDetector(
+              onTap: () {
+                setState(() => _selectedId = m.id);
+                _controller.move(LatLng(m.lat, m.lng), 15);
+                widget.onOpenRestaurant?.call(m.id);
+              },
+              child: _MarkerCard(m: m, l: l, p: p),
             );
           },
         ),
-      ],
+      ),
     );
   }
 }
@@ -471,4 +600,47 @@ class _PinTip extends CustomPainter {
 
   @override
   bool shouldRepaint(covariant _PinTip old) => false;
+}
+
+class _ClusterPin extends StatelessWidget {
+  final int count;
+  final VoidCallback? onTap;
+
+  const _ClusterPin({required this.count, this.onTap});
+
+  @override
+  Widget build(BuildContext context) {
+    final size = count >= 100 ? 52.0 : (count >= 25 ? 46.0 : 40.0);
+    const color = Color(0xFFF37221);
+    final label = count >= 1000 ? '${(count / 1000).toStringAsFixed(1)}k' : '$count';
+    return GestureDetector(
+      onTap: onTap,
+      child: Container(
+        width: size,
+        height: size,
+        decoration: BoxDecoration(
+          color: color,
+          shape: BoxShape.circle,
+          border: Border.all(color: Colors.white, width: 3),
+          boxShadow: [
+            BoxShadow(
+              color: Colors.black.withValues(alpha: 0.25),
+              blurRadius: 8,
+              offset: const Offset(0, 6),
+            ),
+          ],
+        ),
+        alignment: Alignment.center,
+        child: Text(
+          label,
+          style: BgFonts.display(
+            size: count >= 100 ? 14 : 13,
+            weight: FontWeight.w700,
+            color: Colors.white,
+            height: 1,
+          ),
+        ),
+      ),
+    );
+  }
 }

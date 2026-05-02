@@ -806,12 +806,13 @@ class _HeroGallery extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final m1 = media.isNotEmpty ? media[0] : null;
-    final m2 = media.length > 1 ? media[1] : null;
-    final m3 = media.length > 2 ? media[2] : null;
-    final extra = (place.photoCount + place.videoCount) > 3
-        ? '+${(place.photoCount + place.videoCount) - 3}'
-        : null;
+    final photos =
+        media.where((m) => m.kind != 'video').toList(growable: false);
+    final m1 = photos.isNotEmpty ? photos[0] : null;
+    final m2 = photos.length > 1 ? photos[1] : null;
+    final m3 = photos.length > 2 ? photos[2] : null;
+    final totalMedia = place.photoCount + place.videoCount;
+    final extra = totalMedia > 3 ? '+${totalMedia - 3}' : null;
     return GestureDetector(
       onTap: onTap,
       child: SizedBox(

@@ -3,6 +3,7 @@ import 'api/api_error.dart';
 import 'api/auth_api.dart';
 import 'api/client.dart';
 import 'api/favorites_api.dart';
+import 'api/feed_api.dart';
 import 'api/me_api.dart';
 import 'api/media_api.dart';
 import 'api/models.dart';
@@ -27,6 +28,7 @@ class AppState extends ChangeNotifier {
   final ReviewsApi reviewsApi;
   final FavoritesApi favoritesApi;
   final MediaApi mediaApi;
+  final FeedApi feedApi;
 
   SessionStatus _session = SessionStatus.unknown;
   User? _user;
@@ -45,7 +47,8 @@ class AppState extends ChangeNotifier {
         placesApi = PlacesApi(client),
         reviewsApi = ReviewsApi(client),
         favoritesApi = FavoritesApi(client),
-        mediaApi = MediaApi(client);
+        mediaApi = MediaApi(client),
+        feedApi = FeedApi(client);
 
   factory AppState({
     BgLang lang = BgLang.fr,

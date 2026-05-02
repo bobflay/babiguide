@@ -297,6 +297,7 @@ class PlacesApi {
     required double swLng,
     required double neLat,
     required double neLng,
+    double? zoom,
     String? q,
     List<String>? cuisines,
     double? minRating,
@@ -310,6 +311,7 @@ class PlacesApi {
           'sw_lng': swLng,
           'ne_lat': neLat,
           'ne_lng': neLng,
+          'zoom': ?zoom,
           'q': ?q,
           'cuisines':
               ?(cuisines != null && cuisines.isNotEmpty ? cuisines.join(',') : null),
@@ -318,15 +320,23 @@ class PlacesApi {
         },
       );
       final data = res.data as Map<String, dynamic>;
-      final raw = data['markers'];
-      final markers = raw is List
-          ? raw
+      final rawMarkers = data['markers'];
+      final markers = rawMarkers is List
+          ? rawMarkers
               .whereType<Map>()
               .map((e) => MapMarker.fromJson(Map<String, dynamic>.from(e)))
               .toList(growable: false)
           : const <MapMarker>[];
+      final rawClusters = data['clusters'];
+      final clusters = rawClusters is List
+          ? rawClusters
+              .whereType<Map>()
+              .map((e) => MapCluster.fromJson(Map<String, dynamic>.from(e)))
+              .toList(growable: false)
+          : const <MapCluster>[];
       return MapMarkers(
         markers: markers,
+        clusters: clusters,
         truncated: data['truncated'] == true,
       );
     } on DioException catch (e) {
@@ -350,8 +360,59 @@ class PlacesApi {
 
 class MapMarkers {
   final List<MapMarker> markers;
+  final List<MapCluster> clusters;
   final bool truncated;
-  const MapMarkers({required this.markers, required this.truncated});
+  const MapMarkers({
+    required this.markers,
+    this.clusters = const [],
+    required this.truncated,
+  });
+}
+
+class MapCluster {
+  final String id;
+  final double lat;
+  final double lng;
+  final int count;
+  final double? swLat;
+  final double? swLng;
+  final double? neLat;
+  final double? neLng;
+
+  const MapCluster({
+    required this.id,
+    required this.lat,
+    required this.lng,
+    required this.count,
+    this.swLat,
+    this.swLng,
+    this.neLat,
+    this.neLng,
+  });
+
+  bool get hasBbox =>
+      swLat != null && swLng != null && neLat != null && neLng != null;
+
+  factory MapCluster.fromJson(Map<String, dynamic> json) {
+    final raw = json['bbox'];
+    double? swLat, swLng, neLat, neLng;
+    if (raw is List && raw.length == 4) {
+      swLat = (raw[0] as num?)?.toDouble();
+      swLng = (raw[1] as num?)?.toDouble();
+      neLat = (raw[2] as num?)?.toDouble();
+      neLng = (raw[3] as num?)?.toDouble();
+    }
+    return MapCluster(
+      id: json['id'].toString(),
+      lat: (json['lat'] as num?)?.toDouble() ?? 0.0,
+      lng: (json['lng'] as num?)?.toDouble() ?? 0.0,
+      count: (json['count'] as num?)?.toInt() ?? 0,
+      swLat: swLat,
+      swLng: swLng,
+      neLat: neLat,
+      neLng: neLng,
+    );
+  }
 }
 
 class SearchSuggestion {

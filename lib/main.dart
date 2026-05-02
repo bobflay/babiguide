@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:media_kit/media_kit.dart';
 import 'app_state.dart';
 import 'data.dart';
 import 'screens/auth.dart';
@@ -17,6 +18,8 @@ import 'widgets/ios_frame.dart';
 import 'widgets/tab_bar.dart';
 
 void main() {
+  WidgetsFlutterBinding.ensureInitialized();
+  MediaKit.ensureInitialized();
   runApp(const BabiGuideApp());
 }
 
@@ -295,11 +298,15 @@ class _RootState extends State<_Root> {
           onOpenRestaurant: _openDetail,
         );
       case _Route.foryou:
-        return ForYouScreen(onOpenMap: () => _go(_Route.map));
+        return ForYouScreen(
+          onOpenMap: () => _go(_Route.map),
+          onOpenPlace: _openDetail,
+        );
       case _Route.foryouComments:
         return ForYouScreen(
           initialCommentsOpen: true,
           onOpenMap: () => _go(_Route.map),
+          onOpenPlace: _openDetail,
         );
       case _Route.detail:
         return DetailScreen(

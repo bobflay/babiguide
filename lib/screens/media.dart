@@ -6,6 +6,7 @@ import '../data.dart';
 import '../i18n.dart';
 import '../theme.dart';
 import '../widgets/photo_placeholder.dart';
+import '../widgets/video_player.dart';
 
 const List<String> _categoryKeys = [
   'all',
@@ -646,37 +647,19 @@ class _Lightbox extends StatelessWidget {
                       return Center(
                         child: AspectRatio(
                           aspectRatio: 4 / 5,
-                          child: Stack(
-                            children: [
-                              Positioned.fill(
-                                child: PhotoPlaceholder(
+                          child: pi.kind == 'video' && (pi.url ?? '').isNotEmpty
+                              ? BgVideoPlayer(
+                                  key: ValueKey('video_${pi.id ?? pi.seed}'),
+                                  url: pi.url!,
+                                  posterUrl: pi.thumbUrl,
+                                  borderRadius: BorderRadius.circular(14),
+                                )
+                              : PhotoPlaceholder(
                                   seed: pi.seed,
                                   label: pi.label,
                                   borderRadius: BorderRadius.circular(14),
                                   photoUrl: pi.url ?? pi.thumbUrl,
                                 ),
-                              ),
-                              if (pi.kind == 'video')
-                                Center(
-                                  child: Container(
-                                    width: 64,
-                                    height: 64,
-                                    decoration: BoxDecoration(
-                                      color: Colors.black
-                                          .withValues(alpha: 0.55),
-                                      shape: BoxShape.circle,
-                                      border: Border.all(
-                                        color: Colors.white
-                                            .withValues(alpha: 0.7),
-                                        width: 2,
-                                      ),
-                                    ),
-                                    child: const Icon(Icons.play_arrow,
-                                        size: 26, color: Colors.white),
-                                  ),
-                                ),
-                            ],
-                          ),
                         ),
                       );
                     },
