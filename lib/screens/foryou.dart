@@ -582,8 +582,8 @@ class _TopBar extends StatelessWidget {
         ignoring: false,
         child: Stack(
           children: [
-            const IgnorePointer(
-              child: Positioned.fill(
+            const Positioned.fill(
+              child: IgnorePointer(
                 child: DecoratedBox(
                   decoration: BoxDecoration(
                     gradient: LinearGradient(
@@ -736,12 +736,12 @@ class _FeedVideoCard extends StatelessWidget {
           ),
         ),
         // Bottom gradient (improves overlay legibility)
-        const IgnorePointer(
-          child: Positioned(
-            left: 0,
-            right: 0,
-            bottom: 0,
-            height: 380,
+        const Positioned(
+          left: 0,
+          right: 0,
+          bottom: 0,
+          height: 380,
+          child: IgnorePointer(
             child: DecoratedBox(
               decoration: BoxDecoration(
                 gradient: LinearGradient(
