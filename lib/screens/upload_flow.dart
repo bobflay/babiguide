@@ -17,6 +17,7 @@ import '../app_state.dart';
 import '../i18n.dart';
 import '../theme.dart';
 import '../widgets/photo_placeholder.dart';
+import 'upload_cover_editor.dart';
 import 'upload_trim_editor.dart';
 
 /// Three-step upload flow opened from a place's media gallery `+` button.
@@ -65,6 +66,7 @@ class _UploadFlowState extends State<UploadFlow> {
   XFile? _picked; // The originally captured/picked file.
   XFile? _edited; // The post-edit file we'll upload (baked photo or
   //                same as _picked for video).
+  XFile? _editedThumb; // Optional cover frame for videos.
   String _kind = 'photo';
   final TextEditingController _captionCtl = TextEditingController();
 
@@ -84,10 +86,11 @@ class _UploadFlowState extends State<UploadFlow> {
     });
   }
 
-  void _onEditDone(XFile editedFile) {
+  void _onEditDone(XFile editedFile, {XFile? thumb}) {
     if (!mounted) return;
     setState(() {
       _edited = editedFile;
+      _editedThumb = thumb;
       _step = 2;
     });
   }
@@ -107,12 +110,14 @@ class _UploadFlowState extends State<UploadFlow> {
     }
     setState(() => _publishing = true);
     try {
+      final thumb = _editedThumb;
       final result = await state.mediaApi.upload(
         file: File(picked.path),
         kind: _kind,
         placeId: widget.placeSlug,
         category: widget.initialCategory == 'all' ? null : widget.initialCategory,
         label: _composedCaption().trim().isEmpty ? null : _composedCaption(),
+        thumb: thumb == null ? null : File(thumb.path),
       );
       if (!mounted) return;
       Navigator.of(context).pop<MediaUploadResult>(result);
@@ -1328,7 +1333,7 @@ class _EditStep extends StatefulWidget {
   final XFile? picked;
   final String kind;
   final VoidCallback onBack;
-  final void Function(XFile editedFile) onDone;
+  final void Function(XFile editedFile, {XFile? thumb}) onDone;
 
   const _EditStep({
     required this.picked,
@@ -1357,6 +1362,8 @@ class _EditStepState extends State<_EditStep> {
   // Trim window in milliseconds (null = use full clip).
   TrimWindow? _trim;
   bool _trimming = false;
+  // Chosen cover frame for video (null = backend default).
+  CoverFrame? _cover;
 
   @override
   void initState() {
@@ -1400,6 +1407,31 @@ class _EditStepState extends State<_EditStep> {
     } else if (pos < trim.startMs - 16) {
       ctl.seekTo(Duration(milliseconds: trim.startMs));
     }
+  }
+
+  Future<void> _openCoverEditor() async {
+    if (widget.picked == null || widget.kind != 'video') return;
+    final navigator = Navigator.of(context);
+    await _videoCtl?.pause();
+    final result = await navigator.push<CoverFrame?>(
+      MaterialPageRoute<CoverFrame?>(
+        fullscreenDialog: true,
+        builder: (_) => CoverEditor(
+          videoPath: widget.picked!.path,
+          initialMs: _cover?.positionMs,
+          trimStartMs: _trim?.startMs,
+          trimEndMs: _trim?.endMs,
+        ),
+      ),
+    );
+    if (!mounted) return;
+    if (result != null) {
+      setState(() {
+        _cover = result;
+        _activeTool = 1; // Cover
+      });
+    }
+    await _videoCtl?.play();
   }
 
   Future<void> _openTrimEditor() async {
@@ -1509,6 +1541,19 @@ class _EditStepState extends State<_EditStep> {
         _openTrimEditor();
         return;
       case 1: // Cover
+        if (widget.kind != 'video') {
+          ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+            content: Text(l.pick(
+                "La miniature est uniquement pour les vidéos.",
+                'Cover frame is only available for videos.')),
+            behavior: SnackBarBehavior.floating,
+            duration: const Duration(seconds: 2),
+          ));
+          return;
+        }
+        setState(() => _activeTool = idx);
+        _openCoverEditor();
+        return;
       case 4: // Sound
         ScaffoldMessenger.of(context).showSnackBar(SnackBar(
           content: Text(_deferredToolMessage(l, idx)),
@@ -1531,15 +1576,8 @@ class _EditStepState extends State<_EditStep> {
   }
 
   String _deferredToolMessage(L l, int idx) {
-    switch (idx) {
-      case 1:
-        return l.pick(
-            "Le choix de la miniature arrive bientôt.",
-            'Cover frame picker is coming soon.');
-      default:
-        return l.pick(
-            "L'ajout de musique arrive bientôt.", 'Music is coming soon.');
-    }
+    return l.pick(
+        "L'ajout de musique arrive bientôt.", 'Music is coming soon.');
   }
 
   void _onSelectOverlay(String? id) {
@@ -1595,7 +1633,12 @@ class _EditStepState extends State<_EditStep> {
         setState(() => _selectedOverlayId = preserved);
       }
       if (!mounted) return;
-      widget.onDone(out);
+      // Attach the cover thumb only for videos. (Photo thumbs are derived
+      // server-side from the photo itself.)
+      final thumb = widget.kind == 'video' && _cover != null
+          ? XFile(_cover!.jpegFile.path)
+          : null;
+      widget.onDone(out, thumb: thumb);
     } catch (e) {
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(SnackBar(
@@ -1887,6 +1930,44 @@ class _EditStepState extends State<_EditStep> {
                       ),
                       const SizedBox(height: 6),
                     ],
+                    if (_cover != null) ...[
+                      GestureDetector(
+                        onTap: _openCoverEditor,
+                        behavior: HitTestBehavior.opaque,
+                        child: Container(
+                          padding: const EdgeInsets.fromLTRB(4, 4, 10, 4),
+                          decoration: BoxDecoration(
+                            color: Colors.black.withValues(alpha: 0.55),
+                            borderRadius: BorderRadius.circular(999),
+                          ),
+                          child: Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              ClipRRect(
+                                borderRadius: BorderRadius.circular(999),
+                                child: Image.file(
+                                  _cover!.jpegFile,
+                                  width: 22,
+                                  height: 22,
+                                  fit: BoxFit.cover,
+                                ),
+                              ),
+                              const SizedBox(width: 8),
+                              Text(
+                                l.pick('Miniature', 'Cover'),
+                                style: BgFonts.body(
+                                  size: 10,
+                                  weight: FontWeight.w700,
+                                  color: Colors.white,
+                                  height: 1,
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                      ),
+                      const SizedBox(height: 6),
+                    ],
                     if (_overlays.isNotEmpty)
                       Container(
                         padding: const EdgeInsets.symmetric(
@@ -1940,6 +2021,7 @@ class _EditStepState extends State<_EditStep> {
                 l: l,
                 activeTool: _activeTool,
                 trimEnabled: widget.kind == 'video',
+                coverEnabled: widget.kind == 'video',
                 onTap: _onTabTap,
               ),
             ),
@@ -2229,11 +2311,13 @@ class _EditToolTabs extends StatelessWidget {
   final L l;
   final int activeTool;
   final bool trimEnabled;
+  final bool coverEnabled;
   final ValueChanged<int> onTap;
   const _EditToolTabs({
     required this.l,
     required this.activeTool,
     required this.trimEnabled,
+    required this.coverEnabled,
     required this.onTap,
   });
 
@@ -2241,7 +2325,7 @@ class _EditToolTabs extends StatelessWidget {
   Widget build(BuildContext context) {
     final tabs = <(IconData, String, bool)>[
       (Icons.content_cut, l.pick('Couper', 'Trim'), trimEnabled),
-      (Icons.image_outlined, l.pick('Miniature', 'Cover'), false),
+      (Icons.image_outlined, l.pick('Miniature', 'Cover'), coverEnabled),
       (Icons.text_fields_outlined, l.pick('Texte', 'Text'), true),
       (Icons.auto_awesome_outlined, l.pick('Stickers', 'Stickers'), true),
       (Icons.music_note_outlined, l.pick('Son', 'Sound'), false),

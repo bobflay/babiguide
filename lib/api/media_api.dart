@@ -42,6 +42,7 @@ class MediaApi {
     required String placeId,
     String? category,
     String? label,
+    File? thumb,
   }) async {
     try {
       final form = FormData.fromMap({
@@ -50,6 +51,8 @@ class MediaApi {
         'place_id': placeId,
         'category': ?category,
         'label': ?label,
+        if (thumb != null)
+          'thumb': await MultipartFile.fromFile(thumb.path),
       });
       final res = await _client.dio.post('/media/upload', data: form);
       return MediaUploadResult.fromJson(res.data as Map<String, dynamic>);
