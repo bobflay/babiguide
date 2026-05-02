@@ -341,6 +341,8 @@ class _RootState extends State<_Root> {
         return MediaScreen(
           slug: _detailSlug,
           placeName: _detailPlace?.name,
+          placeNeighborhood: _detailPlace?.neighborhood,
+          placePhotoUrl: _detailPlace?.coverPhotoUrl,
           onBack: () => _go(_Route.detail),
           initialIndex: _mediaInitialIndex,
           initialLightbox: _mediaOpenLightbox,
@@ -351,6 +353,8 @@ class _RootState extends State<_Root> {
         return MediaScreen(
           slug: _detailSlug,
           placeName: _detailPlace?.name,
+          placeNeighborhood: _detailPlace?.neighborhood,
+          placePhotoUrl: _detailPlace?.coverPhotoUrl,
           onBack: () => _go(_Route.detail),
           initialLightbox: true,
           onRequireAuth: () =>

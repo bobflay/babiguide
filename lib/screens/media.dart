@@ -1,9 +1,7 @@
-import 'dart:io';
-
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
-import 'package:image_picker/image_picker.dart';
 import '../api/api_error.dart';
+import '../api/media_api.dart';
 import '../api/places_api.dart';
 import '../app_state.dart';
 import '../data.dart';
@@ -12,6 +10,7 @@ import '../theme.dart';
 import '../widgets/comments_sheet.dart';
 import '../widgets/photo_placeholder.dart';
 import '../widgets/video_player.dart';
+import 'upload_flow.dart';
 
 const List<String> _categoryKeys = [
   'all',
@@ -25,6 +24,8 @@ const List<String> _categoryKeys = [
 class MediaScreen extends StatefulWidget {
   final String? slug;
   final String? placeName;
+  final String? placeNeighborhood;
+  final String? placePhotoUrl;
   final VoidCallback? onBack;
   final bool initialLightbox;
   final int initialIndex;
@@ -34,6 +35,8 @@ class MediaScreen extends StatefulWidget {
     super.key,
     this.slug,
     this.placeName,
+    this.placeNeighborhood,
+    this.placePhotoUrl,
     this.onBack,
     this.initialLightbox = false,
     this.initialIndex = 0,
@@ -62,7 +65,6 @@ class _MediaScreenState extends State<MediaScreen> {
   final Map<String, MediaPage> _cache = {};
   Future<MediaPage>? _future;
   Map<String, int> _counts = const {};
-  final ImagePicker _picker = ImagePicker();
   bool _uploading = false;
   final Map<String, _MediaSocialState> _social = {};
   final Set<String> _likePending = {};
@@ -128,104 +130,42 @@ class _MediaScreenState extends State<MediaScreen> {
     final slug = widget.slug;
     if (slug == null || slug.isEmpty) return;
     if (!state.isSignedIn) {
-      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-        content: Text(l.pick(
-            'Connectez-vous pour ajouter une photo', 'Sign in to add a photo')),
-        behavior: SnackBarBehavior.floating,
-      ));
+      final cb = widget.onRequireAuth;
+      if (cb != null) {
+        cb();
+      } else {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+          content: Text(l.pick('Connectez-vous pour ajouter une photo',
+              'Sign in to add a photo')),
+          behavior: SnackBarBehavior.floating,
+        ));
+      }
       return;
     }
-    final source = await _showSourceSheet();
-    if (source == null) return;
-    XFile? picked;
-    try {
-      picked = await _picker.pickImage(
-        source: source,
-        imageQuality: 85,
-        maxWidth: 2048,
-      );
-    } catch (_) {
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-        content: Text(l.photoUploadFailed),
-        behavior: SnackBarBehavior.floating,
-      ));
-      return;
-    }
-    if (picked == null) return;
     setState(() => _uploading = true);
-    try {
-      await state.mediaApi.upload(
-        file: File(picked.path),
-        kind: 'photo',
-        placeId: slug,
-        category: _categoryKeys[_tab] == 'all' ? null : _categoryKeys[_tab],
-      );
-      _cache.clear();
-      if (!mounted) return;
-      _load();
-      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-        content: Text(l.pick('Photo ajoutée', 'Photo added')),
-        behavior: SnackBarBehavior.floating,
-      ));
-    } on ApiError catch (e) {
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-        content: Text(e.message),
-        behavior: SnackBarBehavior.floating,
-      ));
-    } catch (_) {
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-        content: Text(l.photoUploadFailed),
-        behavior: SnackBarBehavior.floating,
-      ));
-    } finally {
-      if (mounted) setState(() => _uploading = false);
-    }
-  }
-
-  Future<ImageSource?> _showSourceSheet() {
-    final l = L(AppScope.of(context).lang);
-    final p = AppScope.of(context).palette;
-    return showModalBottomSheet<ImageSource>(
-      context: context,
-      backgroundColor: p.card,
-      shape: const RoundedRectangleBorder(
-        borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
-      ),
-      builder: (ctx) => SafeArea(
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            ListTile(
-              leading: Icon(Icons.photo_library_outlined, color: p.ink),
-              title: Text(l.pickFromGallery,
-                  style: BgFonts.body(
-                      size: 14, weight: FontWeight.w600, color: p.ink)),
-              onTap: () => Navigator.of(ctx).pop(ImageSource.gallery),
-            ),
-            ListTile(
-              leading: Icon(Icons.photo_camera_outlined, color: p.ink),
-              title: Text(l.pickFromCamera,
-                  style: BgFonts.body(
-                      size: 14, weight: FontWeight.w600, color: p.ink)),
-              onTap: () => Navigator.of(ctx).pop(ImageSource.camera),
-            ),
-            ListTile(
-              title: Center(
-                child: Text(l.cancel,
-                    style: BgFonts.body(
-                        size: 14,
-                        weight: FontWeight.w600,
-                        color: p.inkMuted)),
-              ),
-              onTap: () => Navigator.of(ctx).pop(),
-            ),
-          ],
+    final result = await Navigator.of(context).push<MediaUploadResult>(
+      MaterialPageRoute(
+        fullscreenDialog: true,
+        builder: (_) => UploadFlow(
+          placeSlug: slug,
+          placeName: widget.placeName,
+          placeNeighborhood: widget.placeNeighborhood,
+          placePhotoUrl: widget.placePhotoUrl,
+          initialCategory: _categoryKeys[_tab],
         ),
       ),
     );
+    if (!mounted) return;
+    setState(() => _uploading = false);
+    if (result == null) return;
+    _cache.clear();
+    _load();
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+      content: Text(result.kind == 'video'
+          ? l.pick('Vidéo ajoutée', 'Video added')
+          : l.pick('Photo ajoutée', 'Photo added')),
+      behavior: SnackBarBehavior.floating,
+    ));
   }
 
   void _seedSocialFor(Iterable<GalleryItem> items) {
