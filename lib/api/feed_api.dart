@@ -102,6 +102,9 @@ class FeedVideo {
   final FeedPlace place;
   final String? when;
   final String? createdAt;
+  final int likesCount;
+  final int commentsCount;
+  final bool userLiked;
 
   const FeedVideo({
     required this.id,
@@ -116,6 +119,9 @@ class FeedVideo {
     this.category,
     this.when,
     this.createdAt,
+    this.likesCount = 0,
+    this.commentsCount = 0,
+    this.userLiked = false,
   });
 
   factory FeedVideo.fromJson(Map<String, dynamic> json) {
@@ -138,6 +144,9 @@ class FeedVideo {
           : const FeedPlace(id: '', slug: '', name: ''),
       when: json['when']?.toString(),
       createdAt: json['created_at']?.toString(),
+      likesCount: (json['likes_count'] as num?)?.toInt() ?? 0,
+      commentsCount: (json['comments_count'] as num?)?.toInt() ?? 0,
+      userLiked: json['user_liked'] == true,
     );
   }
 }

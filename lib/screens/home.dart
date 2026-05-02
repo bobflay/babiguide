@@ -48,6 +48,17 @@ class _HomeScreenState extends State<HomeScreen> {
     });
   }
 
+  Future<void> _refresh() async {
+    final state = AppScope.of(context);
+    final fut = state.placesApi.getHome();
+    setState(() => _future = fut);
+    try {
+      await fut;
+    } catch (_) {
+      // surfaced by FutureBuilder
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     final state = AppScope.of(context);
@@ -76,17 +87,21 @@ class _HomeScreenState extends State<HomeScreen> {
             newPlaces: [],
             neighborhoods: [],
           );
-          return _HomeBody(
-            feed: feed,
-            l: l,
-            p: p,
-            userName: state.user?.name,
-            onOpenRestaurant: widget.onOpenRestaurant,
-            onOpenSearch: widget.onOpenSearch,
-            onOpenNeighborhood: widget.onOpenNeighborhood,
-            onSeeAllTrending: widget.onSeeAllTrending,
-            onSeeAllNew: widget.onSeeAllNew,
-            onSeeAllNeighborhoods: widget.onSeeAllNeighborhoods,
+          return RefreshIndicator(
+            onRefresh: _refresh,
+            color: p.orange,
+            child: _HomeBody(
+              feed: feed,
+              l: l,
+              p: p,
+              userName: state.user?.name,
+              onOpenRestaurant: widget.onOpenRestaurant,
+              onOpenSearch: widget.onOpenSearch,
+              onOpenNeighborhood: widget.onOpenNeighborhood,
+              onSeeAllTrending: widget.onSeeAllTrending,
+              onSeeAllNew: widget.onSeeAllNew,
+              onSeeAllNeighborhoods: widget.onSeeAllNeighborhoods,
+            ),
           );
         },
       ),
@@ -200,6 +215,7 @@ class _HomeBody extends StatelessWidget {
   Widget build(BuildContext context) {
     return ListView(
       padding: const EdgeInsets.only(bottom: 140),
+      physics: const AlwaysScrollableScrollPhysics(),
       children: [
         _Header(
           p: p,

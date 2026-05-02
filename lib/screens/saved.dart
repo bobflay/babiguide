@@ -39,6 +39,16 @@ class _SavedScreenState extends State<SavedScreen> {
     });
   }
 
+  Future<void> _refresh() async {
+    final state = AppScope.of(context);
+    if (!state.isSignedIn) return;
+    final fut = state.favoritesApi.list();
+    setState(() => _future = fut);
+    try {
+      await fut;
+    } catch (_) {}
+  }
+
   @override
   Widget build(BuildContext context) {
     final state = AppScope.of(context);
@@ -47,8 +57,12 @@ class _SavedScreenState extends State<SavedScreen> {
 
     return Container(
       color: p.bg,
-      child: ListView(
+      child: RefreshIndicator(
+        onRefresh: _refresh,
+        color: p.orange,
+        child: ListView(
         padding: const EdgeInsets.only(bottom: 140),
+        physics: const AlwaysScrollableScrollPhysics(),
         children: [
           Padding(
             padding: const EdgeInsets.fromLTRB(20, 60, 20, 6),
@@ -151,6 +165,7 @@ class _SavedScreenState extends State<SavedScreen> {
               },
             ),
         ],
+      ),
       ),
     );
   }

@@ -132,6 +132,15 @@ class _SearchScreenState extends State<SearchScreen> {
     });
   }
 
+  Future<void> _refreshResults() async {
+    _runSearch();
+    final fut = _resultsFuture;
+    if (fut == null) return;
+    try {
+      await fut;
+    } catch (_) {}
+  }
+
   void _runSuggestions() {
     final q = _q.text.trim();
     if (q.isEmpty) {
@@ -185,41 +194,46 @@ class _SearchScreenState extends State<SearchScreen> {
                 },
               ),
               Expanded(
-                child: ListView(
-                  padding: const EdgeInsets.only(bottom: 30),
-                  children: [
-                    if (_q.text.trim().isNotEmpty)
-                      _SuggestionsBlock(
-                        future: _suggestionsFuture,
-                        p: p,
-                        onPick: (s) {
-                          if (s.type == 'place' && s.id != null) {
-                            widget.onOpenRestaurant?.call(s.id!);
-                            return;
-                          }
-                          _q.text = s.label;
-                          _q.selection = TextSelection.collapsed(
-                              offset: s.label.length);
-                          _onQueryChanged(s.label);
-                        },
+                child: RefreshIndicator(
+                  onRefresh: _refreshResults,
+                  color: p.orange,
+                  child: ListView(
+                    padding: const EdgeInsets.only(bottom: 30),
+                    physics: const AlwaysScrollableScrollPhysics(),
+                    children: [
+                      if (_q.text.trim().isNotEmpty)
+                        _SuggestionsBlock(
+                          future: _suggestionsFuture,
+                          p: p,
+                          onPick: (s) {
+                            if (s.type == 'place' && s.id != null) {
+                              widget.onOpenRestaurant?.call(s.id!);
+                              return;
+                            }
+                            _q.text = s.label;
+                            _q.selection = TextSelection.collapsed(
+                                offset: s.label.length);
+                            _onQueryChanged(s.label);
+                          },
+                        ),
+                      Padding(
+                        padding: const EdgeInsets.fromLTRB(20, 8, 20, 10),
+                        child: _ResultsHeader(
+                          p: p,
+                          l: l,
+                          future: _resultsFuture,
+                          sortIndex: _filters.sortIndex,
+                          onTapSort: () => setState(() => _showFilter = true),
+                        ),
                       ),
-                    Padding(
-                      padding: const EdgeInsets.fromLTRB(20, 8, 20, 10),
-                      child: _ResultsHeader(
+                      _ResultsList(
+                        future: _resultsFuture,
                         p: p,
                         l: l,
-                        future: _resultsFuture,
-                        sortIndex: _filters.sortIndex,
-                        onTapSort: () => setState(() => _showFilter = true),
+                        onOpenRestaurant: widget.onOpenRestaurant,
                       ),
-                    ),
-                    _ResultsList(
-                      future: _resultsFuture,
-                      p: p,
-                      l: l,
-                      onOpenRestaurant: widget.onOpenRestaurant,
-                    ),
-                  ],
+                    ],
+                  ),
                 ),
               ),
             ],
@@ -368,10 +382,10 @@ class _QuickChips extends StatelessWidget {
       ),
     ];
     return SizedBox(
-      height: 42,
+      height: 52,
       child: ListView.separated(
         scrollDirection: Axis.horizontal,
-        padding: const EdgeInsets.fromLTRB(16, 6, 16, 8),
+        padding: const EdgeInsets.fromLTRB(16, 8, 16, 10),
         itemCount: chips.length,
         separatorBuilder: (_, _) => const SizedBox(width: 8),
         itemBuilder: (_, i) => chips[i].build(context, p),
@@ -390,7 +404,7 @@ class _Chip {
     return GestureDetector(
       onTap: onTap,
       child: Container(
-        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 9),
         decoration: BoxDecoration(
           color: on ? p.ink : p.card,
           borderRadius: BorderRadius.circular(999),
@@ -403,7 +417,7 @@ class _Chip {
             size: 13,
             weight: FontWeight.w600,
             color: on ? p.bg : p.ink,
-            height: 1,
+            height: 1.2,
           ),
         ),
       ),

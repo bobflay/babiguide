@@ -47,4 +47,26 @@ class MeApi {
       throw ApiError.fromDio(e);
     }
   }
+
+  Future<User> updateProfile({
+    String? name,
+    String? email,
+    String? phone,
+    String? avatarUrl,
+  }) async {
+    try {
+      final res = await _client.dio.put(
+        '/me/profile',
+        data: {
+          'name': ?name,
+          'email': ?email,
+          'phone': ?phone,
+          'avatar_url': ?avatarUrl,
+        },
+      );
+      return User.fromJson(res.data as Map<String, dynamic>);
+    } on DioException catch (e) {
+      throw ApiError.fromDio(e);
+    }
+  }
 }

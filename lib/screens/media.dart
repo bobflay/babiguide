@@ -1,10 +1,15 @@
+import 'dart:io';
+
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
+import 'package:image_picker/image_picker.dart';
 import '../api/api_error.dart';
 import '../api/places_api.dart';
 import '../app_state.dart';
 import '../data.dart';
 import '../i18n.dart';
 import '../theme.dart';
+import '../widgets/comments_sheet.dart';
 import '../widgets/photo_placeholder.dart';
 import '../widgets/video_player.dart';
 
@@ -23,6 +28,7 @@ class MediaScreen extends StatefulWidget {
   final VoidCallback? onBack;
   final bool initialLightbox;
   final int initialIndex;
+  final VoidCallback? onRequireAuth;
 
   const MediaScreen({
     super.key,
@@ -31,10 +37,23 @@ class MediaScreen extends StatefulWidget {
     this.onBack,
     this.initialLightbox = false,
     this.initialIndex = 0,
+    this.onRequireAuth,
   });
 
   @override
   State<MediaScreen> createState() => _MediaScreenState();
+}
+
+/// Optimistic counts/like state for a single media item, keyed by media id.
+class _MediaSocialState {
+  int likes;
+  int comments;
+  bool liked;
+  _MediaSocialState({
+    required this.likes,
+    required this.comments,
+    required this.liked,
+  });
 }
 
 class _MediaScreenState extends State<MediaScreen> {
@@ -43,6 +62,10 @@ class _MediaScreenState extends State<MediaScreen> {
   final Map<String, MediaPage> _cache = {};
   Future<MediaPage>? _future;
   Map<String, int> _counts = const {};
+  final ImagePicker _picker = ImagePicker();
+  bool _uploading = false;
+  final Map<String, _MediaSocialState> _social = {};
+  final Set<String> _likePending = {};
 
   @override
   void initState() {
@@ -77,6 +100,7 @@ class _MediaScreenState extends State<MediaScreen> {
     final api = AppScope.of(context).placesApi;
     final fut = api.getMedia(slug, category: cat).then((page) {
       _cache[cat] = page;
+      _seedSocialFor(page.items);
       if (mounted) {
         setState(() {
           if (page.countsByCategory.isNotEmpty) {
@@ -95,6 +119,228 @@ class _MediaScreenState extends State<MediaScreen> {
     if (i == _tab) return;
     setState(() => _tab = i);
     _load();
+  }
+
+  Future<void> _onAddTap() async {
+    if (_uploading) return;
+    final state = AppScope.of(context);
+    final l = L(state.lang);
+    final slug = widget.slug;
+    if (slug == null || slug.isEmpty) return;
+    if (!state.isSignedIn) {
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+        content: Text(l.pick(
+            'Connectez-vous pour ajouter une photo', 'Sign in to add a photo')),
+        behavior: SnackBarBehavior.floating,
+      ));
+      return;
+    }
+    final source = await _showSourceSheet();
+    if (source == null) return;
+    XFile? picked;
+    try {
+      picked = await _picker.pickImage(
+        source: source,
+        imageQuality: 85,
+        maxWidth: 2048,
+      );
+    } catch (_) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+        content: Text(l.photoUploadFailed),
+        behavior: SnackBarBehavior.floating,
+      ));
+      return;
+    }
+    if (picked == null) return;
+    setState(() => _uploading = true);
+    try {
+      await state.mediaApi.upload(
+        file: File(picked.path),
+        kind: 'photo',
+        placeId: slug,
+        category: _categoryKeys[_tab] == 'all' ? null : _categoryKeys[_tab],
+      );
+      _cache.clear();
+      if (!mounted) return;
+      _load();
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+        content: Text(l.pick('Photo ajoutée', 'Photo added')),
+        behavior: SnackBarBehavior.floating,
+      ));
+    } on ApiError catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+        content: Text(e.message),
+        behavior: SnackBarBehavior.floating,
+      ));
+    } catch (_) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+        content: Text(l.photoUploadFailed),
+        behavior: SnackBarBehavior.floating,
+      ));
+    } finally {
+      if (mounted) setState(() => _uploading = false);
+    }
+  }
+
+  Future<ImageSource?> _showSourceSheet() {
+    final l = L(AppScope.of(context).lang);
+    final p = AppScope.of(context).palette;
+    return showModalBottomSheet<ImageSource>(
+      context: context,
+      backgroundColor: p.card,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
+      ),
+      builder: (ctx) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            ListTile(
+              leading: Icon(Icons.photo_library_outlined, color: p.ink),
+              title: Text(l.pickFromGallery,
+                  style: BgFonts.body(
+                      size: 14, weight: FontWeight.w600, color: p.ink)),
+              onTap: () => Navigator.of(ctx).pop(ImageSource.gallery),
+            ),
+            ListTile(
+              leading: Icon(Icons.photo_camera_outlined, color: p.ink),
+              title: Text(l.pickFromCamera,
+                  style: BgFonts.body(
+                      size: 14, weight: FontWeight.w600, color: p.ink)),
+              onTap: () => Navigator.of(ctx).pop(ImageSource.camera),
+            ),
+            ListTile(
+              title: Center(
+                child: Text(l.cancel,
+                    style: BgFonts.body(
+                        size: 14,
+                        weight: FontWeight.w600,
+                        color: p.inkMuted)),
+              ),
+              onTap: () => Navigator.of(ctx).pop(),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  void _seedSocialFor(Iterable<GalleryItem> items) {
+    for (final it in items) {
+      final id = it.id;
+      if (id == null || id.isEmpty) continue;
+      _social.putIfAbsent(
+        id,
+        () => _MediaSocialState(
+          likes: it.likesCount,
+          comments: it.commentsCount,
+          liked: it.userLiked,
+        ),
+      );
+    }
+  }
+
+  _MediaSocialState? _socialFor(GalleryItem item) {
+    final id = item.id;
+    if (id == null || id.isEmpty) return null;
+    return _social.putIfAbsent(
+      id,
+      () => _MediaSocialState(
+        likes: item.likesCount,
+        comments: item.commentsCount,
+        liked: item.userLiked,
+      ),
+    );
+  }
+
+  Future<void> _toggleLike(GalleryItem item) async {
+    final id = item.id;
+    if (id == null || id.isEmpty) return;
+    final state = AppScope.of(context);
+    if (!state.isSignedIn) {
+      widget.onRequireAuth?.call();
+      return;
+    }
+    if (_likePending.contains(id)) return;
+    final s = _socialFor(item);
+    if (s == null) return;
+    final wasLiked = s.liked;
+    setState(() {
+      _likePending.add(id);
+      s.liked = !wasLiked;
+      s.likes = (s.likes + (wasLiked ? -1 : 1)).clamp(0, 1 << 31);
+    });
+    try {
+      final res = wasLiked
+          ? await state.mediaSocialApi.unlike(id)
+          : await state.mediaSocialApi.like(id);
+      if (!mounted) return;
+      setState(() {
+        s.liked = res.userLiked;
+        s.likes = res.likesCount;
+        _likePending.remove(id);
+      });
+    } on ApiError catch (e) {
+      if (!mounted) return;
+      setState(() {
+        s.liked = wasLiked;
+        s.likes = (s.likes + (wasLiked ? 1 : -1)).clamp(0, 1 << 31);
+        _likePending.remove(id);
+      });
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text(e.message), behavior: SnackBarBehavior.floating),
+      );
+    } catch (_) {
+      if (!mounted) return;
+      setState(() {
+        s.liked = wasLiked;
+        s.likes = (s.likes + (wasLiked ? 1 : -1)).clamp(0, 1 << 31);
+        _likePending.remove(id);
+      });
+    }
+  }
+
+  void _openComments(GalleryItem item) {
+    final id = item.id;
+    if (id == null || id.isEmpty) return;
+    final s = _socialFor(item);
+    showCommentsSheet(
+      context,
+      mediaId: id,
+      initialCount: s?.comments ?? item.commentsCount,
+      onCountChanged: (n) {
+        if (!mounted || s == null) return;
+        setState(() => s.comments = n);
+      },
+      onRequireAuth: widget.onRequireAuth,
+    );
+  }
+
+  Future<void> _shareCurrent() async {
+    final state = AppScope.of(context);
+    final l = L(state.lang);
+    final slug = widget.slug;
+    if (slug == null || slug.isEmpty) return;
+    try {
+      final url = await state.placesApi.sharePlace(slug);
+      if (!mounted) return;
+      await Clipboard.setData(ClipboardData(text: url));
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+        content: Text(l.pick(
+            'Lien copié dans le presse-papier', 'Link copied to clipboard')),
+        behavior: SnackBarBehavior.floating,
+      ));
+    } on ApiError catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+        content: Text(e.message),
+        behavior: SnackBarBehavior.floating,
+      ));
+    }
   }
 
   @override
@@ -181,15 +427,30 @@ class _MediaScreenState extends State<MediaScreen> {
                                 ],
                               ),
                             ),
-                            Container(
-                              width: 36,
-                              height: 36,
-                              decoration: BoxDecoration(
-                                color: p.orange,
-                                shape: BoxShape.circle,
+                            GestureDetector(
+                              onTap: _uploading ? null : _onAddTap,
+                              child: Container(
+                                width: 36,
+                                height: 36,
+                                decoration: BoxDecoration(
+                                  color: _uploading
+                                      ? p.orange.withValues(alpha: 0.6)
+                                      : p.orange,
+                                  shape: BoxShape.circle,
+                                ),
+                                child: _uploading
+                                    ? const Padding(
+                                        padding: EdgeInsets.all(10),
+                                        child: CircularProgressIndicator(
+                                          strokeWidth: 2,
+                                          valueColor:
+                                              AlwaysStoppedAnimation<Color>(
+                                                  Colors.white),
+                                        ),
+                                      )
+                                    : const Icon(Icons.add,
+                                        size: 18, color: Colors.white),
                               ),
-                              child: const Icon(Icons.add,
-                                  size: 18, color: Colors.white),
                             ),
                           ],
                         ),
@@ -382,6 +643,10 @@ class _MediaScreenState extends State<MediaScreen> {
           open: _open!,
           items: _cache[_categoryKeys[_tab]]?.items ?? const [],
           onClose: () => setState(() => _open = null),
+          onShare: _shareCurrent,
+          socialFor: _socialFor,
+          onLike: _toggleLike,
+          onComments: _openComments,
         ),
       ],
     );
@@ -396,11 +661,19 @@ class _LightboxOverlay extends StatefulWidget {
   final int open;
   final List<GalleryItem> items;
   final VoidCallback onClose;
+  final VoidCallback onShare;
+  final _MediaSocialState? Function(GalleryItem) socialFor;
+  final ValueChanged<GalleryItem> onLike;
+  final ValueChanged<GalleryItem> onComments;
 
   const _LightboxOverlay({
     required this.open,
     required this.items,
     required this.onClose,
+    required this.onShare,
+    required this.socialFor,
+    required this.onLike,
+    required this.onComments,
   });
 
   @override
@@ -445,8 +718,12 @@ class _LightboxOverlayState extends State<_LightboxOverlay> {
       controller: _controller,
       thumbStrip: items.take(10).toList(),
       onClose: widget.onClose,
+      onShare: widget.onShare,
       onPageChanged: (i) => setState(() => _idx = i),
       onThumbTap: _jumpTo,
+      socialFor: widget.socialFor,
+      onLike: widget.onLike,
+      onComments: widget.onComments,
     );
   }
 }
@@ -555,8 +832,12 @@ class _Lightbox extends StatelessWidget {
   final PageController controller;
   final List<GalleryItem> thumbStrip;
   final VoidCallback onClose;
+  final VoidCallback onShare;
   final ValueChanged<int> onPageChanged;
   final ValueChanged<int> onThumbTap;
+  final _MediaSocialState? Function(GalleryItem) socialFor;
+  final ValueChanged<GalleryItem> onLike;
+  final ValueChanged<GalleryItem> onComments;
 
   const _Lightbox({
     required this.items,
@@ -564,8 +845,12 @@ class _Lightbox extends StatelessWidget {
     required this.controller,
     required this.thumbStrip,
     required this.onClose,
+    required this.onShare,
     required this.onPageChanged,
     required this.onThumbTap,
+    required this.socialFor,
+    required this.onLike,
+    required this.onComments,
   });
 
   @override
@@ -622,15 +907,46 @@ class _Lightbox extends StatelessWidget {
                         ],
                       ),
                     ),
-                    Container(
-                      width: 36,
-                      height: 36,
-                      decoration: BoxDecoration(
-                        color: Colors.white.withValues(alpha: 0.12),
-                        shape: BoxShape.circle,
+                    _LightboxIconButton(
+                      icon: Icon(
+                        (socialFor(item)?.liked ?? false)
+                            ? Icons.favorite
+                            : Icons.favorite_border,
+                        size: 16,
+                        color: (socialFor(item)?.liked ?? false)
+                            ? p.orange
+                            : Colors.white,
                       ),
-                      child: const Icon(Icons.share,
-                          size: 16, color: Colors.white),
+                      label: () {
+                        final n = socialFor(item)?.likes ?? item.likesCount;
+                        return n > 0 ? _formatLightboxCount(n) : null;
+                      }(),
+                      onTap: () => onLike(item),
+                    ),
+                    const SizedBox(width: 8),
+                    _LightboxIconButton(
+                      icon: const Icon(Icons.mode_comment_outlined,
+                          size: 15, color: Colors.white),
+                      label: () {
+                        final n =
+                            socialFor(item)?.comments ?? item.commentsCount;
+                        return n > 0 ? _formatLightboxCount(n) : null;
+                      }(),
+                      onTap: () => onComments(item),
+                    ),
+                    const SizedBox(width: 8),
+                    GestureDetector(
+                      onTap: onShare,
+                      child: Container(
+                        width: 36,
+                        height: 36,
+                        decoration: BoxDecoration(
+                          color: Colors.white.withValues(alpha: 0.12),
+                          shape: BoxShape.circle,
+                        ),
+                        child: const Icon(Icons.share,
+                            size: 16, color: Colors.white),
+                      ),
                     ),
                   ],
                 ),
@@ -773,4 +1089,63 @@ class _Lightbox extends StatelessWidget {
       ),
     );
   }
+}
+
+class _LightboxIconButton extends StatelessWidget {
+  final Widget icon;
+  final String? label;
+  final VoidCallback onTap;
+  const _LightboxIconButton({
+    required this.icon,
+    required this.onTap,
+    this.label,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return GestureDetector(
+      onTap: onTap,
+      behavior: HitTestBehavior.opaque,
+      child: Container(
+        height: 36,
+        padding: EdgeInsets.symmetric(
+            horizontal: label == null ? 0 : 10),
+        constraints: BoxConstraints(minWidth: label == null ? 36 : 48),
+        decoration: BoxDecoration(
+          color: Colors.white.withValues(alpha: 0.12),
+          borderRadius: BorderRadius.circular(999),
+        ),
+        alignment: Alignment.center,
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            icon,
+            if (label != null) ...[
+              const SizedBox(width: 5),
+              Text(
+                label!,
+                style: BgFonts.body(
+                  size: 11,
+                  weight: FontWeight.w700,
+                  color: Colors.white,
+                  height: 1,
+                ),
+              ),
+            ],
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+String _formatLightboxCount(int n) {
+  if (n < 1000) return '$n';
+  if (n < 10000) {
+    final r = (n / 100).round() / 10;
+    return '${r.toStringAsFixed(r.truncateToDouble() == r ? 0 : 1)}k';
+  }
+  if (n < 1000000) return '${(n / 1000).round()}k';
+  final m = (n / 100000).round() / 10;
+  return '${m.toStringAsFixed(m.truncateToDouble() == m ? 0 : 1)}M';
 }

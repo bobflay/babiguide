@@ -10,10 +10,25 @@ import '../api/feed_api.dart';
 import '../app_state.dart';
 import '../i18n.dart';
 import '../theme.dart';
+import '../widgets/comments_sheet.dart';
 import '../widgets/photo_placeholder.dart';
 
 const int _kPageLimit = 10;
 const int _kPrefetchThreshold = 3;
+
+/// Per-feed-item like/comment counts, mutated optimistically when the user
+/// taps the heart or posts a comment. Seeded from the API on first sight,
+/// then we trust the local copy until the next refresh.
+class _SocialState {
+  int likes;
+  int comments;
+  bool liked;
+  _SocialState({
+    required this.likes,
+    required this.comments,
+    required this.liked,
+  });
+}
 
 /// One slot in the feed's controller cache. The parent (`_ForYouScreenState`)
 /// keeps a sliding window of [idx-1, idx, idx+1] so the next video is fully
@@ -30,17 +45,19 @@ class _CachedVideo {
 }
 
 class ForYouScreen extends StatefulWidget {
-  // Kept for compatibility with the existing main.dart routing; the comments
-  // sheet is out of scope for v1 (no backend wiring) and is now a no-op.
+  /// When true, the comments sheet for the first feed item is opened as
+  /// soon as the initial page loads. Used by the `foryouComments` route.
   final bool initialCommentsOpen;
   final VoidCallback? onOpenMap;
   final ValueChanged<String>? onOpenPlace;
+  final VoidCallback? onRequireAuth;
 
   const ForYouScreen({
     super.key,
     this.initialCommentsOpen = false,
     this.onOpenMap,
     this.onOpenPlace,
+    this.onRequireAuth,
   });
 
   @override
@@ -60,6 +77,13 @@ class _ForYouScreenState extends State<ForYouScreen> {
   Object? _initialError;
   Object? _paginationError;
   bool _muted = false;
+  // Per-media social state. Keyed by FeedVideo.id so counts survive the
+  // intentional cycle-back at the end of the feed without diverging.
+  final Map<String, _SocialState> _social = {};
+  // Tracks which media ids have an in-flight like/unlike call so taps don't
+  // race the network.
+  final Set<String> _likePending = {};
+  bool _commentsAutoOpened = false;
 
   @override
   void initState() {
@@ -100,11 +124,13 @@ class _ForYouScreenState extends State<ForYouScreen> {
         for (final v in page.items) {
           if (_seenInCurrentCycle.add(v.id)) _items.add(v);
         }
+        _seedSocialFor(page.items);
         _nextCursor = page.nextCursor;
         _idx = 0;
         _loadingInitial = false;
       });
       _ensureCacheForIndex(_idx);
+      _maybeAutoOpenComments();
     } catch (e) {
       if (!mounted) return;
       setState(() {
@@ -142,6 +168,7 @@ class _ForYouScreenState extends State<ForYouScreen> {
             _items.add(v);
           }
         }
+        _seedSocialFor(page.items);
         _nextCursor = page.nextCursor;
         _loadingMore = false;
       });
@@ -221,9 +248,119 @@ class _ForYouScreenState extends State<ForYouScreen> {
   }
 
   void _onAuthorTap(FeedVideo v) {
-    // user → user profile (no screen yet, stub)
-    // place → place detail
-    if (v.author.isPlace) _openPlace(v);
+    if (v.author.isPlace) {
+      _openPlace(v);
+      return;
+    }
+    final state = AppScope.of(context);
+    final p = state.palette;
+    final l = L(state.lang);
+    showModalBottomSheet<void>(
+      context: context,
+      backgroundColor: p.bg,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(18)),
+      ),
+      builder: (_) => _UserProfileSheet(author: v.author, p: p, l: l),
+    );
+  }
+
+  // ---------------- Social state (likes / comments) ----------------
+
+  void _seedSocialFor(Iterable<FeedVideo> videos) {
+    for (final v in videos) {
+      // Don't clobber an in-flight optimistic update if the same id comes
+      // back from the server (cycle-back).
+      _social.putIfAbsent(
+        v.id,
+        () => _SocialState(
+          likes: v.likesCount,
+          comments: v.commentsCount,
+          liked: v.userLiked,
+        ),
+      );
+    }
+  }
+
+  _SocialState _socialFor(FeedVideo v) {
+    return _social.putIfAbsent(
+      v.id,
+      () => _SocialState(
+        likes: v.likesCount,
+        comments: v.commentsCount,
+        liked: v.userLiked,
+      ),
+    );
+  }
+
+  Future<void> _toggleLike(FeedVideo v) async {
+    final state = AppScope.of(context);
+    if (!state.isSignedIn) {
+      widget.onRequireAuth?.call();
+      return;
+    }
+    if (v.id.isEmpty) return;
+    if (_likePending.contains(v.id)) return;
+    final s = _socialFor(v);
+    final wasLiked = s.liked;
+    setState(() {
+      _likePending.add(v.id);
+      s.liked = !wasLiked;
+      s.likes = (s.likes + (wasLiked ? -1 : 1)).clamp(0, 1 << 31);
+    });
+    try {
+      final res = wasLiked
+          ? await state.mediaSocialApi.unlike(v.id)
+          : await state.mediaSocialApi.like(v.id);
+      if (!mounted) return;
+      setState(() {
+        s.liked = res.userLiked;
+        s.likes = res.likesCount;
+        _likePending.remove(v.id);
+      });
+    } on ApiError catch (e) {
+      if (!mounted) return;
+      setState(() {
+        s.liked = wasLiked;
+        s.likes = (s.likes + (wasLiked ? 1 : -1)).clamp(0, 1 << 31);
+        _likePending.remove(v.id);
+      });
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text(e.message), behavior: SnackBarBehavior.floating),
+      );
+    } catch (_) {
+      if (!mounted) return;
+      setState(() {
+        s.liked = wasLiked;
+        s.likes = (s.likes + (wasLiked ? 1 : -1)).clamp(0, 1 << 31);
+        _likePending.remove(v.id);
+      });
+    }
+  }
+
+  void _openComments(FeedVideo v) {
+    if (v.id.isEmpty) return;
+    final s = _socialFor(v);
+    showCommentsSheet(
+      context,
+      mediaId: v.id,
+      initialCount: s.comments,
+      onCountChanged: (n) {
+        if (!mounted) return;
+        setState(() => s.comments = n);
+      },
+      onRequireAuth: widget.onRequireAuth,
+    );
+  }
+
+  void _maybeAutoOpenComments() {
+    if (!widget.initialCommentsOpen || _commentsAutoOpened) return;
+    if (_items.isEmpty) return;
+    _commentsAutoOpened = true;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted || _items.isEmpty) return;
+      _openComments(_items[0]);
+    });
   }
 
   // ---------------- Controller cache (preloads idx-1, idx, idx+1) ----------------
@@ -384,17 +521,27 @@ class _ForYouScreenState extends State<ForYouScreen> {
               final entry = _cache[i];
               final readyController =
                   (entry != null && entry.ready) ? entry.controller : null;
+              final v = _items[i];
+              final s = _socialFor(v);
               return _FeedVideoCard(
-                key: ValueKey('feed_${i}_${_items[i].id}'),
-                video: _items[i],
+                key: ValueKey('feed_${i}_${v.id}'),
+                video: v,
                 controller: readyController,
                 muted: _muted,
                 palette: p,
                 l: l,
+                likes: s.likes,
+                comments: s.comments,
+                liked: s.liked,
                 onTap: _toggleMute,
-                onAuthorTap: () => _onAuthorTap(_items[i]),
-                onPlaceTap: () => _openPlace(_items[i]),
-                onShareTap: () => _share(_items[i]),
+                onAuthorTap: () => _onAuthorTap(v),
+                onPlaceTap: () => _openPlace(v),
+                onShareTap: () => _share(v),
+                onLikeTap: () => _toggleLike(v),
+                onCommentsTap: () => _openComments(v),
+                onDoubleTapLike: () {
+                  if (!s.liked) _toggleLike(v);
+                },
               );
             },
           ),
@@ -455,11 +602,7 @@ class _TopBar extends StatelessWidget {
               child: Row(
                 mainAxisAlignment: MainAxisAlignment.center,
                 children: [
-                  _topTab(l.fypFollow, false),
-                  const SizedBox(width: 22),
                   _topTab(l.fypFor, true),
-                  const SizedBox(width: 22),
-                  _topTab(l.fypNear, false),
                 ],
               ),
             ),
@@ -531,10 +674,16 @@ class _FeedVideoCard extends StatelessWidget {
   final bool muted;
   final BgPalette palette;
   final L l;
+  final int likes;
+  final int comments;
+  final bool liked;
   final VoidCallback? onTap;
   final VoidCallback? onAuthorTap;
   final VoidCallback? onPlaceTap;
   final VoidCallback? onShareTap;
+  final VoidCallback? onLikeTap;
+  final VoidCallback? onCommentsTap;
+  final VoidCallback? onDoubleTapLike;
 
   const _FeedVideoCard({
     super.key,
@@ -543,10 +692,16 @@ class _FeedVideoCard extends StatelessWidget {
     required this.muted,
     required this.palette,
     required this.l,
+    required this.likes,
+    required this.comments,
+    required this.liked,
     this.onTap,
     this.onAuthorTap,
     this.onPlaceTap,
     this.onShareTap,
+    this.onLikeTap,
+    this.onCommentsTap,
+    this.onDoubleTapLike,
   });
 
   @override
@@ -571,13 +726,12 @@ class _FeedVideoCard extends StatelessWidget {
               ),
             ),
           ),
-        // Tap-to-mute / double-tap stub
+        // Tap-to-mute / double-tap to like
         Positioned.fill(
           child: GestureDetector(
             behavior: HitTestBehavior.opaque,
             onTap: onTap,
-            // Reserved for future "like" — intentionally a no-op stub.
-            onDoubleTap: () {},
+            onDoubleTap: onDoubleTapLike,
             child: const SizedBox.expand(),
           ),
         ),
@@ -639,9 +793,20 @@ class _FeedVideoCard extends StatelessWidget {
               ),
               const SizedBox(height: 18),
               _ActionButton(
-                icon: const Icon(Icons.favorite_border,
-                    color: Colors.white, size: 24),
-                onTap: () {/* stub: future like */},
+                icon: Icon(
+                  liked ? Icons.favorite : Icons.favorite_border,
+                  color: liked ? palette.orange : Colors.white,
+                  size: 24,
+                ),
+                label: likes > 0 ? _formatCount(likes) : null,
+                onTap: onLikeTap,
+              ),
+              const SizedBox(height: 14),
+              _ActionButton(
+                icon: const Icon(Icons.mode_comment_outlined,
+                    color: Colors.white, size: 22),
+                label: comments > 0 ? _formatCount(comments) : null,
+                onTap: onCommentsTap,
               ),
               const SizedBox(height: 14),
               _ActionButton(
@@ -734,7 +899,7 @@ class _AuthorAvatar extends StatelessWidget {
               height: 50,
               decoration: BoxDecoration(
                 color: palette.orange,
-                borderRadius: BorderRadius.circular(12),
+                borderRadius: BorderRadius.circular(6),
                 border: Border.all(color: Colors.white, width: 2),
                 boxShadow: [
                   BoxShadow(
@@ -806,27 +971,64 @@ class _AvatarInitial extends StatelessWidget {
 
 class _ActionButton extends StatelessWidget {
   final Widget icon;
+  final String? label;
   final VoidCallback? onTap;
-  const _ActionButton({required this.icon, this.onTap});
+  const _ActionButton({required this.icon, this.label, this.onTap});
 
   @override
   Widget build(BuildContext context) {
     return GestureDetector(
       onTap: onTap,
       behavior: HitTestBehavior.opaque,
-      child: Container(
-        width: 48,
-        height: 48,
-        decoration: BoxDecoration(
-          color: Colors.black.withValues(alpha: 0.35),
-          shape: BoxShape.circle,
-          border: Border.all(color: Colors.white.withValues(alpha: 0.15)),
-        ),
-        alignment: Alignment.center,
-        child: icon,
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Container(
+            width: 48,
+            height: 48,
+            decoration: BoxDecoration(
+              color: Colors.black.withValues(alpha: 0.35),
+              shape: BoxShape.circle,
+              border: Border.all(color: Colors.white.withValues(alpha: 0.15)),
+            ),
+            alignment: Alignment.center,
+            child: icon,
+          ),
+          if (label != null) ...[
+            const SizedBox(height: 4),
+            Text(
+              label!,
+              style: BgFonts.body(
+                size: 11,
+                weight: FontWeight.w700,
+                color: Colors.white,
+                height: 1,
+              ).copyWith(
+                shadows: const [
+                  Shadow(
+                    color: Color(0x99000000),
+                    blurRadius: 4,
+                    offset: Offset(0, 1),
+                  ),
+                ],
+              ),
+            ),
+          ],
+        ],
       ),
     );
   }
+}
+
+String _formatCount(int n) {
+  if (n < 1000) return '$n';
+  if (n < 10000) {
+    final rounded = (n / 100).round() / 10;
+    return '${rounded.toStringAsFixed(rounded.truncateToDouble() == rounded ? 0 : 1)}k';
+  }
+  if (n < 1000000) return '${(n / 1000).round()}k';
+  final m = (n / 100000).round() / 10;
+  return '${m.toStringAsFixed(m.truncateToDouble() == m ? 0 : 1)}M';
 }
 
 class _BottomInfo extends StatelessWidget {
@@ -1252,6 +1454,122 @@ class _RetryPill extends StatelessWidget {
                 weight: FontWeight.w600,
                 color: Colors.white,
                 height: 1,
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _UserProfileSheet extends StatelessWidget {
+  final FeedAuthor author;
+  final BgPalette p;
+  final L l;
+  const _UserProfileSheet({
+    required this.author,
+    required this.p,
+    required this.l,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final initial =
+        author.name.isNotEmpty ? author.name.characters.first : '?';
+    final hasAvatar = author.avatarUrl != null && author.avatarUrl!.isNotEmpty;
+    return SafeArea(
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(20, 16, 20, 22),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Container(
+              width: 40,
+              height: 4,
+              decoration: BoxDecoration(
+                color: p.cardBorder,
+                borderRadius: BorderRadius.circular(2),
+              ),
+            ),
+            const SizedBox(height: 18),
+            Container(
+              width: 72,
+              height: 72,
+              decoration: BoxDecoration(
+                color: p.orangeSoft,
+                shape: BoxShape.circle,
+                image: hasAvatar
+                    ? DecorationImage(
+                        image: NetworkImage(author.avatarUrl!),
+                        fit: BoxFit.cover,
+                      )
+                    : null,
+              ),
+              alignment: Alignment.center,
+              child: hasAvatar
+                  ? null
+                  : Text(
+                      initial.toString().toUpperCase(),
+                      style: BgFonts.display(
+                        size: 28,
+                        weight: FontWeight.w700,
+                        color: p.orangeDeep,
+                      ),
+                    ),
+            ),
+            const SizedBox(height: 12),
+            Row(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                Flexible(
+                  child: Text(
+                    author.name.isEmpty
+                        ? l.pick('Utilisateur', 'User')
+                        : author.name,
+                    style: BgFonts.display(
+                      size: 18,
+                      weight: FontWeight.w700,
+                      color: p.ink,
+                    ),
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                ),
+                if (author.verified) ...[
+                  const SizedBox(width: 6),
+                  Icon(Icons.verified, size: 16, color: p.orange),
+                ],
+              ],
+            ),
+            const SizedBox(height: 8),
+            Text(
+              l.pick(
+                'Profils des contributeurs bientôt disponibles.',
+                'Contributor profiles are coming soon.',
+              ),
+              textAlign: TextAlign.center,
+              style: BgFonts.body(size: 13, color: p.inkMuted, height: 1.4),
+            ),
+            const SizedBox(height: 18),
+            GestureDetector(
+              onTap: () => Navigator.of(context).pop(),
+              child: Container(
+                padding: const EdgeInsets.symmetric(vertical: 12),
+                width: double.infinity,
+                decoration: BoxDecoration(
+                  color: p.card,
+                  borderRadius: BorderRadius.circular(12),
+                  border: Border.all(color: p.cardBorder),
+                ),
+                alignment: Alignment.center,
+                child: Text(
+                  l.pick('Fermer', 'Close'),
+                  style: BgFonts.body(
+                    size: 13,
+                    weight: FontWeight.w700,
+                    color: p.ink,
+                  ),
+                ),
               ),
             ),
           ],

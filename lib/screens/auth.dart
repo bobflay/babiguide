@@ -36,6 +36,23 @@ class _AuthScreenState extends State<AuthScreen> {
 
   bool _isEmail(String s) => s.contains('@');
 
+  Future<void> _openForgotPassword() async {
+    final state = AppScope.of(context);
+    final l = L(state.lang);
+    final controller = TextEditingController(
+      text: _isEmail(_identifier.text.trim()) ? _identifier.text.trim() : '',
+    );
+    await showDialog<void>(
+      context: context,
+      builder: (ctx) => _ForgotPasswordDialog(
+        controller: controller,
+        l: l,
+        state: state,
+      ),
+    );
+    controller.dispose();
+  }
+
   Future<void> _submit() async {
     if (_busy) return;
     final state = AppScope.of(context);
@@ -219,6 +236,26 @@ class _AuthScreenState extends State<AuthScreen> {
                   ),
                 ),
               ),
+              if (!isSignup) ...[
+                const SizedBox(height: 10),
+                Align(
+                  alignment: Alignment.centerRight,
+                  child: GestureDetector(
+                    onTap: _busy ? null : _openForgotPassword,
+                    child: Padding(
+                      padding: const EdgeInsets.symmetric(vertical: 4),
+                      child: Text(
+                        l.pick('Mot de passe oublié ?', 'Forgot password?'),
+                        style: BgFonts.body(
+                          size: 12,
+                          weight: FontWeight.w600,
+                          color: p.orangeDeep,
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
+              ],
               if (_error != null) ...[
                 const SizedBox(height: 14),
                 Container(
@@ -301,6 +338,149 @@ class _AuthScreenState extends State<AuthScreen> {
           ),
         ),
       ),
+    );
+  }
+}
+
+class _ForgotPasswordDialog extends StatefulWidget {
+  final TextEditingController controller;
+  final L l;
+  final AppState state;
+  const _ForgotPasswordDialog({
+    required this.controller,
+    required this.l,
+    required this.state,
+  });
+
+  @override
+  State<_ForgotPasswordDialog> createState() => _ForgotPasswordDialogState();
+}
+
+class _ForgotPasswordDialogState extends State<_ForgotPasswordDialog> {
+  bool _busy = false;
+  String? _error;
+
+  Future<void> _send() async {
+    final l = widget.l;
+    final email = widget.controller.text.trim();
+    if (email.isEmpty || !email.contains('@')) {
+      setState(() => _error = l.pick('Email invalide', 'Invalid email'));
+      return;
+    }
+    setState(() {
+      _busy = true;
+      _error = null;
+    });
+    try {
+      await widget.state.authApi.requestPasswordReset(email: email);
+      if (!mounted) return;
+      Navigator.of(context).pop();
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+        content: Text(l.pick(
+          'Si l\'email est enregistré, un lien a été envoyé.',
+          'If the email is registered, a reset link has been sent.',
+        )),
+        behavior: SnackBarBehavior.floating,
+      ));
+    } on ApiError catch (e) {
+      if (!mounted) return;
+      setState(() => _error = e.message);
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final p = widget.state.palette;
+    final l = widget.l;
+    return AlertDialog(
+      backgroundColor: p.bg,
+      title: Text(
+        l.pick('Réinitialiser le mot de passe', 'Reset password'),
+        style: BgFonts.display(
+          size: 17,
+          weight: FontWeight.w700,
+          color: p.ink,
+        ),
+      ),
+      content: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            l.pick(
+              'Entrez votre email pour recevoir un lien de réinitialisation.',
+              'Enter your email to receive a reset link.',
+            ),
+            style: BgFonts.body(size: 13, color: p.inkMuted, height: 1.4),
+          ),
+          const SizedBox(height: 12),
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+            decoration: BoxDecoration(
+              color: p.card,
+              borderRadius: BorderRadius.circular(10),
+              border: Border.all(
+                color: _error != null ? p.orangeDeep : p.cardBorder,
+              ),
+            ),
+            child: TextField(
+              controller: widget.controller,
+              autofocus: true,
+              keyboardType: TextInputType.emailAddress,
+              style: BgFonts.body(size: 14, color: p.ink),
+              decoration: InputDecoration(
+                border: InputBorder.none,
+                isDense: true,
+                hintText: l.pick('Email', 'Email'),
+                hintStyle: BgFonts.body(size: 13, color: p.inkMuted),
+              ),
+            ),
+          ),
+          if (_error != null) ...[
+            const SizedBox(height: 8),
+            Text(
+              _error!,
+              style: BgFonts.body(
+                size: 12,
+                weight: FontWeight.w600,
+                color: p.orangeDeep,
+              ),
+            ),
+          ],
+        ],
+      ),
+      actions: [
+        TextButton(
+          onPressed: _busy ? null : () => Navigator.of(context).pop(),
+          child: Text(
+            l.pick('Annuler', 'Cancel'),
+            style: BgFonts.body(
+              size: 13,
+              weight: FontWeight.w600,
+              color: p.inkMuted,
+            ),
+          ),
+        ),
+        TextButton(
+          onPressed: _busy ? null : _send,
+          child: _busy
+              ? const SizedBox(
+                  width: 14,
+                  height: 14,
+                  child: CircularProgressIndicator(strokeWidth: 2),
+                )
+              : Text(
+                  l.pick('Envoyer', 'Send'),
+                  style: BgFonts.body(
+                    size: 13,
+                    weight: FontWeight.w700,
+                    color: p.orangeDeep,
+                  ),
+                ),
+        ),
+      ],
     );
   }
 }

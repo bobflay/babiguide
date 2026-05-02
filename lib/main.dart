@@ -299,12 +299,16 @@ class _RootState extends State<_Root> {
         return ForYouScreen(
           onOpenMap: () => _go(_Route.map),
           onOpenPlace: _openDetail,
+          onRequireAuth: () =>
+              _requireAuth(onSuccess: () => _go(_Route.foryou)),
         );
       case _Route.foryouComments:
         return ForYouScreen(
           initialCommentsOpen: true,
           onOpenMap: () => _go(_Route.map),
           onOpenPlace: _openDetail,
+          onRequireAuth: () =>
+              _requireAuth(onSuccess: () => _go(_Route.foryou)),
         );
       case _Route.detail:
         return DetailScreen(
@@ -340,6 +344,8 @@ class _RootState extends State<_Root> {
           onBack: () => _go(_Route.detail),
           initialIndex: _mediaInitialIndex,
           initialLightbox: _mediaOpenLightbox,
+          onRequireAuth: () =>
+              _requireAuth(onSuccess: () => _go(_Route.media)),
         );
       case _Route.mediaLightbox:
         return MediaScreen(
@@ -347,6 +353,8 @@ class _RootState extends State<_Root> {
           placeName: _detailPlace?.name,
           onBack: () => _go(_Route.detail),
           initialLightbox: true,
+          onRequireAuth: () =>
+              _requireAuth(onSuccess: () => _go(_Route.mediaLightbox)),
         );
       case _Route.saved:
         return SavedScreen(

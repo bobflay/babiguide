@@ -6,6 +6,7 @@ import 'api/favorites_api.dart';
 import 'api/feed_api.dart';
 import 'api/me_api.dart';
 import 'api/media_api.dart';
+import 'api/media_social_api.dart';
 import 'api/models.dart';
 import 'api/places_api.dart';
 import 'api/reviews_api.dart';
@@ -28,6 +29,7 @@ class AppState extends ChangeNotifier {
   final ReviewsApi reviewsApi;
   final FavoritesApi favoritesApi;
   final MediaApi mediaApi;
+  final MediaSocialApi mediaSocialApi;
   final FeedApi feedApi;
 
   SessionStatus _session = SessionStatus.unknown;
@@ -48,6 +50,7 @@ class AppState extends ChangeNotifier {
         reviewsApi = ReviewsApi(client),
         favoritesApi = FavoritesApi(client),
         mediaApi = MediaApi(client),
+        mediaSocialApi = MediaSocialApi(client),
         feedApi = FeedApi(client);
 
   factory AppState({

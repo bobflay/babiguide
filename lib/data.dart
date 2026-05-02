@@ -192,6 +192,9 @@ class GalleryItem {
   final String? url;
   final String? thumbUrl;
   final String? category;
+  final int likesCount;
+  final int commentsCount;
+  final bool userLiked;
 
   const GalleryItem({
     required this.seed,
@@ -207,7 +210,35 @@ class GalleryItem {
     this.url,
     this.thumbUrl,
     this.category,
+    this.likesCount = 0,
+    this.commentsCount = 0,
+    this.userLiked = false,
   });
+
+  GalleryItem copyWith({
+    int? likesCount,
+    int? commentsCount,
+    bool? userLiked,
+  }) {
+    return GalleryItem(
+      seed: seed,
+      label: label,
+      kind: kind,
+      duration: duration,
+      cat: cat,
+      author: author,
+      when: when,
+      verified: verified,
+      span: span,
+      id: id,
+      url: url,
+      thumbUrl: thumbUrl,
+      category: category,
+      likesCount: likesCount ?? this.likesCount,
+      commentsCount: commentsCount ?? this.commentsCount,
+      userLiked: userLiked ?? this.userLiked,
+    );
+  }
 
   factory GalleryItem.fromJson(Map<String, dynamic> json) {
     final id = json['id']?.toString();
@@ -229,6 +260,9 @@ class GalleryItem {
       span: (json['span'] as num?)?.toInt() ?? 1,
       url: resolveMediaUrl(json['url']?.toString()),
       thumbUrl: resolveMediaUrl(json['thumb_url']?.toString()),
+      likesCount: (json['likes_count'] as num?)?.toInt() ?? 0,
+      commentsCount: (json['comments_count'] as num?)?.toInt() ?? 0,
+      userLiked: json['user_liked'] == true,
     );
   }
 }

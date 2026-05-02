@@ -1423,6 +1423,7 @@ class _MenuTab extends StatefulWidget {
 class _MenuTabState extends State<_MenuTab> {
   final TextEditingController _controller = TextEditingController();
   String _query = '';
+  String? _selectedCategory;
 
   @override
   void dispose() {
@@ -1436,18 +1437,36 @@ class _MenuTabState extends State<_MenuTab> {
     return hay.contains(q);
   }
 
+  String _categoryKey(MenuHighlight m, String fallback) {
+    return (m.category != null && m.category!.trim().isNotEmpty)
+        ? m.category!.trim()
+        : fallback;
+  }
+
   @override
   Widget build(BuildContext context) {
     final l = widget.l;
     final p = widget.p;
     final q = _query.trim().toLowerCase();
     final fallback = l.pick('Autres', 'Other');
+
+    final categories = <String>[];
+    final seen = <String>{};
+    for (final m in widget.menu) {
+      final key = _categoryKey(m, fallback);
+      if (seen.add(key)) categories.add(key);
+    }
+
+    final activeCategory = _selectedCategory != null &&
+            categories.contains(_selectedCategory)
+        ? _selectedCategory
+        : null;
+
     final groups = <String, List<MenuHighlight>>{};
     for (final m in widget.menu) {
       if (!_matches(m, q)) continue;
-      final key = (m.category != null && m.category!.trim().isNotEmpty)
-          ? m.category!.trim()
-          : fallback;
+      final key = _categoryKey(m, fallback);
+      if (activeCategory != null && key != activeCategory) continue;
       groups.putIfAbsent(key, () => <MenuHighlight>[]).add(m);
     }
 
@@ -1468,6 +1487,16 @@ class _MenuTabState extends State<_MenuTab> {
               setState(() => _query = '');
             },
           ),
+          if (categories.length > 1) ...[
+            const SizedBox(height: 12),
+            _MenuCategoryFilter(
+              p: p,
+              allLabel: l.pick('Tous', 'All'),
+              categories: categories,
+              selected: activeCategory,
+              onSelect: (c) => setState(() => _selectedCategory = c),
+            ),
+          ],
           const SizedBox(height: 14),
           if (groups.isEmpty)
             _TabEmpty(
@@ -1480,15 +1509,103 @@ class _MenuTabState extends State<_MenuTab> {
             )
           else
             for (final entry in groups.entries) ...[
-              _MenuCategoryHeader(label: entry.key),
-              const SizedBox(height: 8),
+              if (activeCategory == null) ...[
+                _MenuCategoryHeader(label: entry.key),
+                const SizedBox(height: 8),
+              ],
               for (final m in entry.value) ...[
                 _MenuItem(m: m),
                 const SizedBox(height: 8),
               ],
-              const SizedBox(height: 8),
+              if (activeCategory == null) const SizedBox(height: 8),
             ],
         ],
+      ),
+    );
+  }
+}
+
+class _MenuCategoryFilter extends StatelessWidget {
+  final BgPalette p;
+  final String allLabel;
+  final List<String> categories;
+  final String? selected;
+  final ValueChanged<String?> onSelect;
+
+  const _MenuCategoryFilter({
+    required this.p,
+    required this.allLabel,
+    required this.categories,
+    required this.selected,
+    required this.onSelect,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return SizedBox(
+      height: 36,
+      child: ListView.separated(
+        scrollDirection: Axis.horizontal,
+        padding: EdgeInsets.zero,
+        itemCount: categories.length + 1,
+        separatorBuilder: (_, _) => const SizedBox(width: 8),
+        itemBuilder: (_, i) {
+          if (i == 0) {
+            final on = selected == null;
+            return _MenuFilterPill(
+              label: allLabel,
+              on: on,
+              p: p,
+              onTap: () => onSelect(null),
+            );
+          }
+          final cat = categories[i - 1];
+          final on = selected == cat;
+          return _MenuFilterPill(
+            label: cat,
+            on: on,
+            p: p,
+            onTap: () => onSelect(on ? null : cat),
+          );
+        },
+      ),
+    );
+  }
+}
+
+class _MenuFilterPill extends StatelessWidget {
+  final String label;
+  final bool on;
+  final BgPalette p;
+  final VoidCallback onTap;
+  const _MenuFilterPill({
+    required this.label,
+    required this.on,
+    required this.p,
+    required this.onTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return GestureDetector(
+      onTap: onTap,
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+        decoration: BoxDecoration(
+          color: on ? p.orange : p.card,
+          borderRadius: BorderRadius.circular(999),
+          border: on ? null : Border.all(color: p.cardBorder),
+        ),
+        alignment: Alignment.center,
+        child: Text(
+          label,
+          style: BgFonts.body(
+            size: 12,
+            weight: FontWeight.w600,
+            color: on ? Colors.white : p.ink,
+            height: 1.2,
+          ),
+        ),
       ),
     );
   }

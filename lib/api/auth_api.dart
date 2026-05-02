@@ -82,4 +82,15 @@ class AuthApi {
       throw ApiError.fromDio(e);
     }
   }
+
+  Future<void> requestPasswordReset({required String email}) async {
+    try {
+      await _client.dio.post(
+        '/auth/forgot-password',
+        data: {'email': email},
+      );
+    } on DioException catch (e) {
+      throw ApiError.fromDio(e);
+    }
+  }
 }
