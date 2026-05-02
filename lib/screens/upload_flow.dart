@@ -1347,9 +1347,9 @@ class _EditStep extends StatefulWidget {
 }
 
 class _EditStepState extends State<_EditStep> {
-  // Tool indices: 0=Trim, 1=Cover, 2=Text, 3=Stickers, 4=Sound, 5=Filters.
+  // Tool indices: 0=Trim, 1=Cover, 2=Text, 3=Stickers, 4=Filters.
   static const int _toolTrim = 0;
-  static const int _toolFilters = 5;
+  static const int _toolFilters = 4;
   int _filterIdx = 0;
   int _activeTool = _toolFilters;
   final List<_EditOverlay> _overlays = [];
@@ -1554,13 +1554,6 @@ class _EditStepState extends State<_EditStep> {
         setState(() => _activeTool = idx);
         _openCoverEditor();
         return;
-      case 4: // Sound
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-          content: Text(_deferredToolMessage(l, idx)),
-          behavior: SnackBarBehavior.floating,
-          duration: const Duration(seconds: 2),
-        ));
-        return;
       case 2:
         setState(() => _activeTool = idx);
         _onAddText();
@@ -1573,11 +1566,6 @@ class _EditStepState extends State<_EditStep> {
         setState(() => _activeTool = idx);
         return;
     }
-  }
-
-  String _deferredToolMessage(L l, int idx) {
-    return l.pick(
-        "L'ajout de musique arrive bientôt.", 'Music is coming soon.');
   }
 
   void _onSelectOverlay(String? id) {
@@ -2328,7 +2316,6 @@ class _EditToolTabs extends StatelessWidget {
       (Icons.image_outlined, l.pick('Miniature', 'Cover'), coverEnabled),
       (Icons.text_fields_outlined, l.pick('Texte', 'Text'), true),
       (Icons.auto_awesome_outlined, l.pick('Stickers', 'Stickers'), true),
-      (Icons.music_note_outlined, l.pick('Son', 'Sound'), false),
       (Icons.auto_fix_high_outlined, l.pick('Filtres', 'Filters'), true),
     ];
     return Padding(
