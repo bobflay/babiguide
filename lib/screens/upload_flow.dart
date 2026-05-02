@@ -8,6 +8,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
 import 'package:flutter/services.dart';
 import 'package:image_picker/image_picker.dart';
+import 'package:video_compress/video_compress.dart';
 import 'package:video_player/video_player.dart';
 
 import '../api/api_error.dart';
@@ -16,6 +17,7 @@ import '../app_state.dart';
 import '../i18n.dart';
 import '../theme.dart';
 import '../widgets/photo_placeholder.dart';
+import 'upload_trim_editor.dart';
 
 /// Three-step upload flow opened from a place's media gallery `+` button.
 /// Mirrors screens 15–17 from the Claude design hand-off:
@@ -1341,6 +1343,7 @@ class _EditStep extends StatefulWidget {
 
 class _EditStepState extends State<_EditStep> {
   // Tool indices: 0=Trim, 1=Cover, 2=Text, 3=Stickers, 4=Sound, 5=Filters.
+  static const int _toolTrim = 0;
   static const int _toolFilters = 5;
   int _filterIdx = 0;
   int _activeTool = _toolFilters;
@@ -1351,6 +1354,9 @@ class _EditStepState extends State<_EditStep> {
   int _overlayCounter = 0;
   VideoPlayerController? _videoCtl;
   bool _videoReady = false;
+  // Trim window in milliseconds (null = use full clip).
+  TrimWindow? _trim;
+  bool _trimming = false;
 
   @override
   void initState() {
@@ -1369,6 +1375,7 @@ class _EditStepState extends State<_EditStep> {
       await ctl.setLooping(false);
       await ctl.seekTo(Duration.zero);
       await ctl.pause();
+      ctl.addListener(_onVideoTick);
       if (!mounted) {
         await ctl.dispose();
         return;
@@ -1382,8 +1389,47 @@ class _EditStepState extends State<_EditStep> {
     }
   }
 
+  void _onVideoTick() {
+    final ctl = _videoCtl;
+    final trim = _trim;
+    if (ctl == null || trim == null || !ctl.value.isInitialized) return;
+    final pos = ctl.value.position.inMilliseconds;
+    if (pos >= trim.endMs - 16) {
+      ctl.seekTo(Duration(milliseconds: trim.startMs));
+      if (!ctl.value.isPlaying) ctl.play();
+    } else if (pos < trim.startMs - 16) {
+      ctl.seekTo(Duration(milliseconds: trim.startMs));
+    }
+  }
+
+  Future<void> _openTrimEditor() async {
+    if (widget.picked == null || widget.kind != 'video') return;
+    final navigator = Navigator.of(context);
+    // Pause main preview so the trim editor's preview owns playback.
+    await _videoCtl?.pause();
+    final result = await navigator.push<TrimWindow?>(
+      MaterialPageRoute<TrimWindow?>(
+        fullscreenDialog: true,
+        builder: (_) => TrimEditor(
+          videoPath: widget.picked!.path,
+          initial: _trim,
+        ),
+      ),
+    );
+    if (!mounted) return;
+    if (result != null) {
+      setState(() {
+        _trim = result.isFullClip ? null : result;
+        _activeTool = _toolTrim;
+      });
+      await _videoCtl?.seekTo(Duration(milliseconds: result.startMs));
+    }
+    await _videoCtl?.play();
+  }
+
   @override
   void dispose() {
+    _videoCtl?.removeListener(_onVideoTick);
     _videoCtl?.dispose();
     super.dispose();
   }
@@ -1448,7 +1494,20 @@ class _EditStepState extends State<_EditStep> {
   void _onTabTap(int idx) {
     final l = L(AppScope.of(context).lang);
     switch (idx) {
-      case 0: // Trim
+      case _toolTrim:
+        if (widget.kind != 'video') {
+          ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+            content: Text(l.pick(
+                "Le découpage est uniquement pour les vidéos.",
+                'Trim is only available for videos.')),
+            behavior: SnackBarBehavior.floating,
+            duration: const Duration(seconds: 2),
+          ));
+          return;
+        }
+        setState(() => _activeTool = idx);
+        _openTrimEditor();
+        return;
       case 1: // Cover
       case 4: // Sound
         ScaffoldMessenger.of(context).showSnackBar(SnackBar(
@@ -1473,9 +1532,6 @@ class _EditStepState extends State<_EditStep> {
 
   String _deferredToolMessage(L l, int idx) {
     switch (idx) {
-      case 0:
-        return l.pick(
-            "Le découpage vidéo arrive bientôt.", 'Video trim is coming soon.');
       case 1:
         return l.pick(
             "Le choix de la miniature arrive bientôt.",
@@ -1528,8 +1584,11 @@ class _EditStepState extends State<_EditStep> {
       XFile out;
       if (widget.kind == 'photo') {
         out = await _bakePhoto();
+      } else if (widget.kind == 'video' && _trim != null) {
+        // Filter / overlays still preview-only on video, but trim is real.
+        final trimmed = await _trimVideo();
+        out = trimmed ?? widget.picked ?? XFile('');
       } else {
-        // Video: pass through. Filter / overlays are preview-only this pass.
         out = widget.picked ?? XFile('');
       }
       if (preserved != null) {
@@ -1546,6 +1605,51 @@ class _EditStepState extends State<_EditStep> {
       ));
     } finally {
       if (mounted) setState(() => _baking = false);
+    }
+  }
+
+  /// Re-encode the picked video clipped to [_trim] using `video_compress`.
+  /// Returns the new file, or null on failure (caller falls back to the
+  /// original).
+  ///
+  /// `VideoCompress.compressVideo` takes integer-second `startTime` and
+  /// `duration`, so the timeline handles snap to whole seconds — fine for the
+  /// 15/30/60s clips this app deals with.
+  String _formatTrim(TrimWindow t) {
+    String hms(int ms) {
+      final s = ms ~/ 1000;
+      final mm = (s ~/ 60).toString().padLeft(2, '0');
+      final ss = (s % 60).toString().padLeft(2, '0');
+      return '$mm:$ss';
+    }
+
+    final secs = ((t.endMs - t.startMs) / 1000).round();
+    return '${hms(t.startMs)} → ${hms(t.endMs)} · ${secs}s';
+  }
+
+  Future<XFile?> _trimVideo() async {
+    final picked = widget.picked;
+    final trim = _trim;
+    if (picked == null || trim == null) return null;
+    if (_trimming) return null;
+    _trimming = true;
+    try {
+      final startSec = (trim.startMs ~/ 1000);
+      final lengthSec =
+          ((trim.endMs - trim.startMs) / 1000).round().clamp(1, 60 * 5);
+      final info = await VideoCompress.compressVideo(
+        picked.path,
+        quality: VideoQuality.MediumQuality,
+        startTime: startSec,
+        duration: lengthSec,
+      );
+      final out = info?.file;
+      if (out == null) return null;
+      return XFile(out.path);
+    } catch (_) {
+      return null;
+    } finally {
+      _trimming = false;
     }
   }
 
@@ -1742,35 +1846,74 @@ class _EditStepState extends State<_EditStep> {
                   onScaleDown: () => _onScaleSelected(0.87),
                 ),
               ),
-            // Video-only banner: filters/overlays preview only.
-            if (widget.kind == 'video' && _overlays.isNotEmpty)
+            // Video-only banners: trim badge (re-openable) and the
+            // "preview only" warning when overlays are present.
+            if (widget.kind == 'video')
               Positioned(
                 top: 110,
                 left: 16,
-                child: Container(
-                  padding: const EdgeInsets.symmetric(
-                      horizontal: 10, vertical: 6),
-                  decoration: BoxDecoration(
-                    color: Colors.black.withValues(alpha: 0.6),
-                    borderRadius: BorderRadius.circular(999),
-                  ),
-                  child: Row(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      const Icon(Icons.info_outline,
-                          color: Colors.white, size: 12),
-                      const SizedBox(width: 6),
-                      Text(
-                        l.pick('Aperçu seulement', 'Preview only'),
-                        style: BgFonts.body(
-                          size: 10,
-                          weight: FontWeight.w700,
-                          color: Colors.white,
-                          height: 1,
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    if (_trim != null) ...[
+                      GestureDetector(
+                        onTap: _openTrimEditor,
+                        behavior: HitTestBehavior.opaque,
+                        child: Container(
+                          padding: const EdgeInsets.symmetric(
+                              horizontal: 10, vertical: 6),
+                          decoration: BoxDecoration(
+                            color: const Color(0xFFF37221),
+                            borderRadius: BorderRadius.circular(999),
+                          ),
+                          child: Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              const Icon(Icons.content_cut,
+                                  color: Colors.white, size: 12),
+                              const SizedBox(width: 6),
+                              Text(
+                                _formatTrim(_trim!),
+                                style: BgFonts.body(
+                                  size: 10,
+                                  weight: FontWeight.w700,
+                                  color: Colors.white,
+                                  height: 1,
+                                ),
+                              ),
+                            ],
+                          ),
                         ),
                       ),
+                      const SizedBox(height: 6),
                     ],
-                  ),
+                    if (_overlays.isNotEmpty)
+                      Container(
+                        padding: const EdgeInsets.symmetric(
+                            horizontal: 10, vertical: 6),
+                        decoration: BoxDecoration(
+                          color: Colors.black.withValues(alpha: 0.6),
+                          borderRadius: BorderRadius.circular(999),
+                        ),
+                        child: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            const Icon(Icons.info_outline,
+                                color: Colors.white, size: 12),
+                            const SizedBox(width: 6),
+                            Text(
+                              l.pick('Aperçu seulement', 'Preview only'),
+                              style: BgFonts.body(
+                                size: 10,
+                                weight: FontWeight.w700,
+                                color: Colors.white,
+                                height: 1,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                  ],
                 ),
               ),
             // Filter strip (always visible; this is the most useful tool).
@@ -1796,6 +1939,7 @@ class _EditStepState extends State<_EditStep> {
               child: _EditToolTabs(
                 l: l,
                 activeTool: _activeTool,
+                trimEnabled: widget.kind == 'video',
                 onTap: _onTabTap,
               ),
             ),
@@ -2084,17 +2228,19 @@ class _FilterStrip extends StatelessWidget {
 class _EditToolTabs extends StatelessWidget {
   final L l;
   final int activeTool;
+  final bool trimEnabled;
   final ValueChanged<int> onTap;
   const _EditToolTabs({
     required this.l,
     required this.activeTool,
+    required this.trimEnabled,
     required this.onTap,
   });
 
   @override
   Widget build(BuildContext context) {
     final tabs = <(IconData, String, bool)>[
-      (Icons.content_cut, l.pick('Couper', 'Trim'), false),
+      (Icons.content_cut, l.pick('Couper', 'Trim'), trimEnabled),
       (Icons.image_outlined, l.pick('Miniature', 'Cover'), false),
       (Icons.text_fields_outlined, l.pick('Texte', 'Text'), true),
       (Icons.auto_awesome_outlined, l.pick('Stickers', 'Stickers'), true),
