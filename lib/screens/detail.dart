@@ -18,6 +18,7 @@ class DetailScreen extends StatefulWidget {
   final ValueChanged<int>? onOpenMediaAt;
   final ValueChanged<DetailPlace>? onLoaded;
   final VoidCallback? onRequireAuthForFavorite;
+  final VoidCallback? onOpenChat;
 
   const DetailScreen({
     super.key,
@@ -28,6 +29,7 @@ class DetailScreen extends StatefulWidget {
     this.onOpenMediaAt,
     this.onLoaded,
     this.onRequireAuthForFavorite,
+    this.onOpenChat,
   });
 
   @override
@@ -141,6 +143,7 @@ class _DetailScreenState extends State<DetailScreen> {
             onShare: () => _share(bundle.place),
             onDirections: () => _openDirections(bundle.place),
             onCall: () => _call(bundle.place),
+            onOpenChat: widget.onOpenChat,
             onRequireAuthForFavorite: widget.onRequireAuthForFavorite,
             onReviewsChanged: _load,
             isFavorite: isFav,
@@ -352,6 +355,7 @@ class _DetailBody extends StatelessWidget {
   final VoidCallback? onShare;
   final VoidCallback? onDirections;
   final VoidCallback? onCall;
+  final VoidCallback? onOpenChat;
   final VoidCallback? onRequireAuthForFavorite;
   final VoidCallback? onReviewsChanged;
   final bool isFavorite;
@@ -370,6 +374,7 @@ class _DetailBody extends StatelessWidget {
     required this.onShare,
     required this.onDirections,
     required this.onCall,
+    required this.onOpenChat,
     required this.onRequireAuthForFavorite,
     required this.onReviewsChanged,
     required this.isFavorite,
@@ -454,6 +459,11 @@ class _DetailBody extends StatelessWidget {
             children: [
               _CircleBtn(icon: Icons.chevron_left, onTap: onBack),
               const Spacer(),
+              _CircleBtn(
+                icon: Icons.auto_awesome,
+                onTap: onOpenChat,
+              ),
+              const SizedBox(width: 8),
               _CircleBtn(icon: Icons.share_outlined, onTap: onShare),
               const SizedBox(width: 8),
               _CircleBtn(

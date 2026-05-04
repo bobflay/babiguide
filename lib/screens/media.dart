@@ -25,6 +25,7 @@ class MediaScreen extends StatefulWidget {
   final String? slug;
   final String? placeName;
   final String? placeNeighborhood;
+  final String? placeCuisine;
   final String? placePhotoUrl;
   final VoidCallback? onBack;
   final bool initialLightbox;
@@ -36,6 +37,7 @@ class MediaScreen extends StatefulWidget {
     this.slug,
     this.placeName,
     this.placeNeighborhood,
+    this.placeCuisine,
     this.placePhotoUrl,
     this.onBack,
     this.initialLightbox = false,
@@ -150,6 +152,7 @@ class _MediaScreenState extends State<MediaScreen> {
           placeSlug: slug,
           placeName: widget.placeName,
           placeNeighborhood: widget.placeNeighborhood,
+          placeCuisine: widget.placeCuisine,
           placePhotoUrl: widget.placePhotoUrl,
           initialCategory: _categoryKeys[_tab],
         ),

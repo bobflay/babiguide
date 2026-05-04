@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'api/api_error.dart';
 import 'api/auth_api.dart';
+import 'api/chat_api.dart';
 import 'api/client.dart';
 import 'api/favorites_api.dart';
 import 'api/feed_api.dart';
@@ -31,6 +32,7 @@ class AppState extends ChangeNotifier {
   final MediaApi mediaApi;
   final MediaSocialApi mediaSocialApi;
   final FeedApi feedApi;
+  final ChatApi chatApi;
 
   SessionStatus _session = SessionStatus.unknown;
   User? _user;
@@ -51,7 +53,8 @@ class AppState extends ChangeNotifier {
         favoritesApi = FavoritesApi(client),
         mediaApi = MediaApi(client),
         mediaSocialApi = MediaSocialApi(client),
-        feedApi = FeedApi(client);
+        feedApi = FeedApi(client),
+        chatApi = ChatApi(client);
 
   factory AppState({
     BgLang lang = BgLang.fr,

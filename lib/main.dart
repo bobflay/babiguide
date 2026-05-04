@@ -2,11 +2,12 @@ import 'package:flutter/material.dart';
 import 'app_state.dart';
 import 'data.dart';
 import 'screens/auth.dart';
+import 'screens/chat.dart';
 import 'screens/detail.dart';
 import 'screens/foryou.dart';
 import 'screens/home.dart';
 import 'screens/map_view.dart';
-import 'screens/media.dart';
+import 'screens/media.dart'; 
 import 'screens/onboarding.dart';
 import 'screens/profile.dart';
 import 'screens/review.dart';
@@ -76,6 +77,7 @@ enum _Route {
   mediaLightbox,
   saved,
   profile,
+  chat,
 }
 
 class _Root extends StatefulWidget {
@@ -327,6 +329,8 @@ class _RootState extends State<_Root> {
               _go(_Route.detail);
             },
           ),
+          onOpenChat: () =>
+              _requireAuth(onSuccess: () => _go(_Route.chat)),
         );
       case _Route.review:
         return ReviewScreen(
@@ -342,6 +346,7 @@ class _RootState extends State<_Root> {
           slug: _detailSlug,
           placeName: _detailPlace?.name,
           placeNeighborhood: _detailPlace?.neighborhood,
+          placeCuisine: _detailPlace?.cuisine,
           placePhotoUrl: _detailPlace?.coverPhotoUrl,
           onBack: () => _go(_Route.detail),
           initialIndex: _mediaInitialIndex,
@@ -354,6 +359,7 @@ class _RootState extends State<_Root> {
           slug: _detailSlug,
           placeName: _detailPlace?.name,
           placeNeighborhood: _detailPlace?.neighborhood,
+          placeCuisine: _detailPlace?.cuisine,
           placePhotoUrl: _detailPlace?.coverPhotoUrl,
           onBack: () => _go(_Route.detail),
           initialLightbox: true,
@@ -370,6 +376,12 @@ class _RootState extends State<_Root> {
         return ProfileScreen(
           onSignIn: () =>
               _requireAuth(onSuccess: () => _go(_Route.profile)),
+        );
+      case _Route.chat:
+        return ChatScreen(
+          slug: _detailSlug ?? '',
+          placeName: _detailPlace?.name,
+          onBack: () => _go(_Route.detail),
         );
     }
   }

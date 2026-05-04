@@ -11,6 +11,10 @@ import 'package:image_picker/image_picker.dart';
 import 'package:video_compress/video_compress.dart';
 import 'package:video_player/video_player.dart';
 
+import 'dart:convert';
+
+import 'package:shared_preferences/shared_preferences.dart';
+
 import '../api/api_error.dart';
 import '../api/media_api.dart';
 import '../app_state.dart';
@@ -37,6 +41,7 @@ class UploadFlow extends StatefulWidget {
   final String placeSlug;
   final String? placeName;
   final String? placeNeighborhood;
+  final String? placeCuisine;
   final String? placePhotoUrl;
   final String? initialCategory;
 
@@ -45,6 +50,7 @@ class UploadFlow extends StatefulWidget {
     required this.placeSlug,
     this.placeName,
     this.placeNeighborhood,
+    this.placeCuisine,
     this.placePhotoUrl,
     this.initialCategory,
   });
@@ -55,13 +61,14 @@ class UploadFlow extends StatefulWidget {
 
 const List<int> _kDurations = [15, 30, 60];
 
+/// Backend `sub` keys for the four ratings shown on the publish page,
+/// indexed to match the localized labels (Plats / Service / Toilettes /
+/// Ambiance). See `reviewSubKeys` in lib/constants.dart.
+const List<String> _kPublishSubKeys = ['food', 'staff', 'toilet', 'ambiance'];
+
 class _UploadFlowState extends State<UploadFlow> {
   int _step = 0;
-  int _audienceIdx = 0;
-  final Map<int, int> _stars = {0: 5, 1: 4, 2: 4, 3: 5};
-  final Set<int> _selectedHashtags = {0, 1};
-  bool _allowComments = true;
-  bool _allowDuet = true;
+  final Map<int, int> _stars = {0: 0, 1: 0, 2: 0, 3: 0};
   bool _publishing = false;
   XFile? _picked; // The originally captured/picked file.
   XFile? _edited; // The post-edit file we'll upload (baked photo or
@@ -70,10 +77,56 @@ class _UploadFlowState extends State<UploadFlow> {
   String _kind = 'photo';
   final TextEditingController _captionCtl = TextEditingController();
 
+  String get _draftKey => 'babiguide.upload_draft.${widget.placeSlug}';
+
+  @override
+  void initState() {
+    super.initState();
+    _loadDraft();
+  }
+
   @override
   void dispose() {
     _captionCtl.dispose();
     super.dispose();
+  }
+
+  Future<void> _loadDraft() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final raw = prefs.getString(_draftKey);
+      if (raw == null) return;
+      final data = jsonDecode(raw);
+      if (data is! Map) return;
+      final caption = data['caption']?.toString() ?? '';
+      final stars = data['stars'];
+      if (!mounted) return;
+      setState(() {
+        _captionCtl.text = caption;
+        if (stars is Map) {
+          for (final k in [0, 1, 2, 3]) {
+            final v = stars['$k'];
+            if (v is num) _stars[k] = v.toInt().clamp(0, 5);
+          }
+        }
+      });
+    } catch (_) {
+      // Drafts are best-effort — bad/legacy payloads are ignored silently.
+    }
+  }
+
+  Future<void> _saveDraftToPrefs() async {
+    final prefs = await SharedPreferences.getInstance();
+    final payload = jsonEncode({
+      'caption': _captionCtl.text,
+      'stars': {for (final e in _stars.entries) '${e.key}': e.value},
+    });
+    await prefs.setString(_draftKey, payload);
+  }
+
+  Future<void> _clearDraft() async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.remove(_draftKey);
   }
 
   void _onCaptured(XFile file, String kind) {
@@ -111,16 +164,39 @@ class _UploadFlowState extends State<UploadFlow> {
     setState(() => _publishing = true);
     try {
       final thumb = _editedThumb;
-      final result = await state.mediaApi.upload(
+      final caption = _captionCtl.text.trim();
+      final media = await state.mediaApi.upload(
         file: File(picked.path),
         kind: _kind,
         placeId: widget.placeSlug,
         category: widget.initialCategory == 'all' ? null : widget.initialCategory,
-        label: _composedCaption().trim().isEmpty ? null : _composedCaption(),
+        label: caption.isEmpty ? null : caption,
         thumb: thumb == null ? null : File(thumb.path),
       );
+      // Submit a review whenever the user gave at least one sub-rating.
+      // Otherwise treat this as a media-only upload so the user can post
+      // a video without grading the place.
+      final subs = <String, int>{
+        for (final e in _stars.entries)
+          if (e.value > 0 && e.key < _kPublishSubKeys.length)
+            _kPublishSubKeys[e.key]: e.value,
+      };
+      if (subs.isNotEmpty) {
+        final overall = (subs.values.reduce((a, b) => a + b) / subs.length)
+            .round()
+            .clamp(1, 5);
+        await state.reviewsApi.postReview(
+          widget.placeSlug,
+          rating: overall,
+          text: _captionCtl.text.trim(),
+          sub: subs,
+          tags: const [],
+          mediaIds: [media.id],
+        );
+      }
+      await _clearDraft();
       if (!mounted) return;
-      Navigator.of(context).pop<MediaUploadResult>(result);
+      Navigator.of(context).pop<MediaUploadResult>(media);
     } on ApiError catch (e) {
       if (!mounted) return;
       setState(() => _publishing = false);
@@ -138,21 +214,17 @@ class _UploadFlowState extends State<UploadFlow> {
     }
   }
 
-  String _composedCaption() {
-    final base = _captionCtl.text.trim();
-    if (_selectedHashtags.isEmpty) return base;
-    final tags = _hashtagList(L(AppScope.of(context).lang));
-    final selected = _selectedHashtags
-        .where((i) => i < tags.length)
-        .map((i) => tags[i])
-        .join(' ');
-    if (base.isEmpty) return selected;
-    return '$base $selected';
+  Future<void> _saveDraftAndExit() async {
+    final messenger = ScaffoldMessenger.of(context);
+    final l = L(AppScope.of(context).lang);
+    await _saveDraftToPrefs();
+    if (!mounted) return;
+    messenger.showSnackBar(SnackBar(
+      content: Text(l.pick('Brouillon enregistré', 'Draft saved')),
+      behavior: SnackBarBehavior.floating,
+    ));
+    Navigator.of(context).maybePop();
   }
-
-  List<String> _hashtagList(L l) => l.isFr
-      ? const ['#abidjan', '#cocody', '#maquis', '#poulet', '#bonplan']
-      : const ['#abidjan', '#cocody', '#maquis', '#chicken', '#mustgo'];
 
   @override
   Widget build(BuildContext context) {
@@ -175,33 +247,17 @@ class _UploadFlowState extends State<UploadFlow> {
         _ => _PublishStep(
             captionCtl: _captionCtl,
             picked: _edited ?? _picked,
+            thumb: _editedThumb,
             kind: _kind,
             placeName: widget.placeName,
             placeNeighborhood: widget.placeNeighborhood,
             placePhotoUrl: widget.placePhotoUrl,
-            audienceIdx: _audienceIdx,
             stars: _stars,
-            selectedHashtags: _selectedHashtags,
-            allowComments: _allowComments,
-            allowDuet: _allowDuet,
             publishing: _publishing,
-            onAudienceChanged: (i) => setState(() => _audienceIdx = i),
             onStarChanged: (cat, n) => setState(() => _stars[cat] = n),
-            onHashtagToggled: (i) => setState(() {
-              if (_selectedHashtags.contains(i)) {
-                _selectedHashtags.remove(i);
-              } else {
-                _selectedHashtags.add(i);
-              }
-            }),
-            onAllowCommentsChanged: (v) =>
-                setState(() => _allowComments = v),
-            onAllowDuetChanged: (v) => setState(() => _allowDuet = v),
             onBack: () => setState(() => _step = 1),
             onPublish: _publish,
-            onSaveDraft: () {
-              Navigator.of(context).maybePop();
-            },
+            onSaveDraft: _saveDraftAndExit,
           ),
       },
     );
@@ -527,12 +583,12 @@ class _CaptureStepState extends State<_CaptureStep>
                 ),
               ),
             // Top dim gradient for legibility.
-            const IgnorePointer(
-              child: Positioned(
-                top: 0,
-                left: 0,
-                right: 0,
-                height: 180,
+            const Positioned(
+              top: 0,
+              left: 0,
+              right: 0,
+              height: 180,
+              child: IgnorePointer(
                 child: DecoratedBox(
                   decoration: BoxDecoration(
                     gradient: LinearGradient(
@@ -1756,12 +1812,12 @@ class _EditStepState extends State<_EditStep> {
                 ),
               ),
             // Top dim gradient (outside RepaintBoundary).
-            const IgnorePointer(
-              child: Positioned(
-                top: 0,
-                left: 0,
-                right: 0,
-                height: 160,
+            const Positioned(
+              top: 0,
+              left: 0,
+              right: 0,
+              height: 160,
+              child: IgnorePointer(
                 child: DecoratedBox(
                   decoration: BoxDecoration(
                     gradient: LinearGradient(
@@ -1774,12 +1830,12 @@ class _EditStepState extends State<_EditStep> {
               ),
             ),
             // Bottom dim gradient.
-            const IgnorePointer(
-              child: Positioned(
-                bottom: 0,
-                left: 0,
-                right: 0,
-                height: 280,
+            const Positioned(
+              bottom: 0,
+              left: 0,
+              right: 0,
+              height: 280,
+              child: IgnorePointer(
                 child: DecoratedBox(
                   decoration: BoxDecoration(
                     gradient: LinearGradient(
@@ -2662,21 +2718,14 @@ class _StickerPicker extends StatelessWidget {
 class _PublishStep extends StatelessWidget {
   final TextEditingController captionCtl;
   final XFile? picked;
+  final XFile? thumb;
   final String kind;
   final String? placeName;
   final String? placeNeighborhood;
   final String? placePhotoUrl;
-  final int audienceIdx;
   final Map<int, int> stars;
-  final Set<int> selectedHashtags;
-  final bool allowComments;
-  final bool allowDuet;
   final bool publishing;
-  final ValueChanged<int> onAudienceChanged;
   final void Function(int category, int stars) onStarChanged;
-  final ValueChanged<int> onHashtagToggled;
-  final ValueChanged<bool> onAllowCommentsChanged;
-  final ValueChanged<bool> onAllowDuetChanged;
   final VoidCallback onBack;
   final VoidCallback onPublish;
   final VoidCallback onSaveDraft;
@@ -2684,21 +2733,14 @@ class _PublishStep extends StatelessWidget {
   const _PublishStep({
     required this.captionCtl,
     required this.picked,
+    required this.thumb,
     required this.kind,
     required this.placeName,
     required this.placeNeighborhood,
     required this.placePhotoUrl,
-    required this.audienceIdx,
     required this.stars,
-    required this.selectedHashtags,
-    required this.allowComments,
-    required this.allowDuet,
     required this.publishing,
-    required this.onAudienceChanged,
     required this.onStarChanged,
-    required this.onHashtagToggled,
-    required this.onAllowCommentsChanged,
-    required this.onAllowDuetChanged,
     required this.onBack,
     required this.onPublish,
     required this.onSaveDraft,
@@ -2712,9 +2754,6 @@ class _PublishStep extends StatelessWidget {
     final cats = l.isFr
         ? const ['Plats', 'Service', 'Toilettes', 'Ambiance']
         : const ['Food', 'Service', 'Toilets', 'Ambiance'];
-    final hashtags = l.isFr
-        ? const ['#abidjan', '#cocody', '#maquis', '#poulet', '#bonplan']
-        : const ['#abidjan', '#cocody', '#maquis', '#chicken', '#mustgo'];
     return Material(
       color: p.bg,
       child: SafeArea(
@@ -2736,7 +2775,7 @@ class _PublishStep extends StatelessWidget {
               child: Row(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  _PublishPreview(picked: picked, kind: kind),
+                  _PublishPreview(picked: picked, thumb: thumb, kind: kind),
                   const SizedBox(width: 12),
                   Expanded(
                     child: Column(
@@ -2751,8 +2790,8 @@ class _PublishStep extends StatelessWidget {
                           controller: captionCtl,
                           palette: p,
                           hint: l.pick(
-                            "Le poulet braisé est top, l'attente un peu longue mais ça vaut le coup #cocody #maquis",
-                            'The grilled chicken is great, wait was a bit long but worth it #cocody #maquis',
+                            'Décrivez votre expérience…',
+                            'Describe your experience…',
                           ),
                         ),
                       ],
@@ -2918,7 +2957,7 @@ class _PublishStep extends StatelessWidget {
                             Row(
                               mainAxisSize: MainAxisSize.min,
                               children: List.generate(5, (s) {
-                                final filled = s < (stars[i] ?? 4);
+                                final filled = s < (stars[i] ?? 0);
                                 return GestureDetector(
                                   onTap: () => onStarChanged(i, s + 1),
                                   behavior: HitTestBehavior.opaque,
@@ -2942,114 +2981,6 @@ class _PublishStep extends StatelessWidget {
                     }),
                   ),
                 ],
-              ),
-            ),
-            // Hashtags.
-            Padding(
-              padding: const EdgeInsets.fromLTRB(16, 20, 16, 0),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  _SectionLabel(
-                    text: l.pick('Hashtags suggérés', 'Suggested hashtags'),
-                    palette: p,
-                  ),
-                  const SizedBox(height: 8),
-                  Wrap(
-                    spacing: 6,
-                    runSpacing: 6,
-                    children: List.generate(hashtags.length, (i) {
-                      final on = selectedHashtags.contains(i);
-                      return GestureDetector(
-                        onTap: () => onHashtagToggled(i),
-                        behavior: HitTestBehavior.opaque,
-                        child: Container(
-                          padding: const EdgeInsets.symmetric(
-                              horizontal: 11, vertical: 6),
-                          decoration: BoxDecoration(
-                            color: on ? p.orange : p.card,
-                            borderRadius: BorderRadius.circular(999),
-                            border: on
-                                ? null
-                                : Border.all(color: p.cardBorder),
-                          ),
-                          child: Text(
-                            hashtags[i],
-                            style: BgFonts.body(
-                              size: 12,
-                              weight: FontWeight.w600,
-                              color: on ? Colors.white : p.ink,
-                              height: 1,
-                            ),
-                          ),
-                        ),
-                      );
-                    }),
-                  ),
-                ],
-              ),
-            ),
-            // Audience.
-            Padding(
-              padding: const EdgeInsets.fromLTRB(16, 20, 16, 0),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  _SectionLabel(
-                    text: l.pick('Audience', 'Audience'),
-                    palette: p,
-                  ),
-                  const SizedBox(height: 8),
-                  Container(
-                    padding: const EdgeInsets.all(4),
-                    decoration: BoxDecoration(
-                      color: p.card,
-                      borderRadius: BorderRadius.circular(999),
-                      border: Border.all(color: p.cardBorder),
-                    ),
-                    child: Row(
-                      children: [
-                        _audPill(p, l.pick('Public', 'Public'),
-                            Icons.public, 0),
-                        _audPill(p, l.pick('Abonnés', 'Followers'),
-                            Icons.people_outline, 1),
-                        _audPill(p, l.pick('Privé', 'Private'),
-                            Icons.lock_outline, 2),
-                      ],
-                    ),
-                  ),
-                ],
-              ),
-            ),
-            // Toggles.
-            Padding(
-              padding: const EdgeInsets.fromLTRB(16, 20, 16, 0),
-              child: Container(
-                padding:
-                    const EdgeInsets.symmetric(horizontal: 14),
-                decoration: BoxDecoration(
-                  color: p.card,
-                  borderRadius: BorderRadius.circular(14),
-                  border: Border.all(color: p.cardBorder),
-                ),
-                child: Column(
-                  children: [
-                    _ToggleRow(
-                      label: l.pick('Autoriser les commentaires',
-                          'Allow comments'),
-                      value: allowComments,
-                      onChanged: onAllowCommentsChanged,
-                      palette: p,
-                      withDivider: true,
-                    ),
-                    _ToggleRow(
-                      label: l.pick('Autoriser les duos', 'Allow duets'),
-                      value: allowDuet,
-                      onChanged: onAllowDuetChanged,
-                      palette: p,
-                    ),
-                  ],
-                ),
               ),
             ),
             // Verify message.
@@ -3108,39 +3039,6 @@ class _PublishStep extends StatelessWidget {
     );
   }
 
-  Widget _audPill(BgPalette p, String label, IconData icon, int idx) {
-    final on = audienceIdx == idx;
-    return Expanded(
-      child: GestureDetector(
-        onTap: () => onAudienceChanged(idx),
-        behavior: HitTestBehavior.opaque,
-        child: Container(
-          padding: const EdgeInsets.symmetric(vertical: 8),
-          decoration: BoxDecoration(
-            color: on ? p.orange : Colors.transparent,
-            borderRadius: BorderRadius.circular(999),
-          ),
-          child: Row(
-            mainAxisAlignment: MainAxisAlignment.center,
-            children: [
-              Icon(icon,
-                  size: 13, color: on ? Colors.white : p.ink),
-              const SizedBox(width: 5),
-              Text(
-                label,
-                style: BgFonts.body(
-                  size: 12,
-                  weight: FontWeight.w600,
-                  color: on ? Colors.white : p.ink,
-                  height: 1,
-                ),
-              ),
-            ],
-          ),
-        ),
-      ),
-    );
-  }
 }
 
 class _PublishHeader extends StatelessWidget {
@@ -3230,65 +3128,283 @@ class _PublishHeader extends StatelessWidget {
   }
 }
 
-class _PublishPreview extends StatelessWidget {
+class _PublishPreview extends StatefulWidget {
   final XFile? picked;
+  final XFile? thumb;
   final String kind;
-  const _PublishPreview({required this.picked, required this.kind});
+  const _PublishPreview({
+    required this.picked,
+    required this.thumb,
+    required this.kind,
+  });
+
+  @override
+  State<_PublishPreview> createState() => _PublishPreviewState();
+}
+
+class _PublishPreviewState extends State<_PublishPreview> {
+  File? _autoThumb;
+  bool _autoThumbLoading = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _maybeGenerateThumb();
+  }
+
+  @override
+  void didUpdateWidget(_PublishPreview oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.picked?.path != widget.picked?.path ||
+        oldWidget.thumb?.path != widget.thumb?.path ||
+        oldWidget.kind != widget.kind) {
+      _autoThumb = null;
+      _maybeGenerateThumb();
+    }
+  }
+
+  /// If this is a video and the editor didn't bake a cover frame, ask
+  /// `video_compress` for the first-frame thumbnail so the publish
+  /// preview shows the actual recording instead of a placeholder.
+  Future<void> _maybeGenerateThumb() async {
+    if (widget.kind != 'video') return;
+    if (widget.thumb != null) return;
+    final picked = widget.picked;
+    if (picked == null || picked.path.isEmpty) return;
+    if (_autoThumbLoading) return;
+    _autoThumbLoading = true;
+    try {
+      final file = await VideoCompress.getFileThumbnail(
+        picked.path,
+        quality: 70,
+        position: 0,
+      );
+      if (!mounted) return;
+      setState(() => _autoThumb = file);
+    } catch (_) {
+      // Falls back to the dark placeholder below.
+    } finally {
+      _autoThumbLoading = false;
+    }
+  }
+
+  void _openVideoPlayer() {
+    final picked = widget.picked;
+    if (picked == null || picked.path.isEmpty) return;
+    if (widget.kind != 'video') return;
+    Navigator.of(context).push(
+      MaterialPageRoute(
+        fullscreenDialog: true,
+        builder: (_) => _VideoPreviewPage(filePath: picked.path),
+      ),
+    );
+  }
 
   @override
   Widget build(BuildContext context) {
+    final picked = widget.picked;
+    final thumb = widget.thumb;
+    final isVideo = widget.kind == 'video';
+    Widget background;
+    if (picked != null && !isVideo) {
+      background = Image.file(
+        File(picked.path),
+        fit: BoxFit.cover,
+        errorBuilder: (_, _, _) => const PhotoPlaceholder(
+          seed: 'up-preview',
+          showLabel: false,
+        ),
+      );
+    } else if (isVideo && thumb != null) {
+      background = Image.file(
+        File(thumb.path),
+        fit: BoxFit.cover,
+        errorBuilder: (_, _, _) => const ColoredBox(color: Color(0xFF1A1209)),
+      );
+    } else if (isVideo && _autoThumb != null) {
+      background = Image.file(
+        _autoThumb!,
+        fit: BoxFit.cover,
+        errorBuilder: (_, _, _) => const ColoredBox(color: Color(0xFF1A1209)),
+      );
+    } else {
+      background = const ColoredBox(color: Color(0xFF1A1209));
+    }
     return SizedBox(
       width: 92,
       child: AspectRatio(
         aspectRatio: 9 / 16,
-        child: ClipRRect(
-          borderRadius: BorderRadius.circular(12),
-          child: Stack(
-            fit: StackFit.expand,
-            children: [
-              if (picked != null && kind == 'photo')
-                Image.file(
-                  File(picked!.path),
-                  fit: BoxFit.cover,
-                  errorBuilder: (_, _, _) => const PhotoPlaceholder(
-                    seed: 'up-preview',
-                    label: 'POULET',
-                    showLabel: true,
-                  ),
-                )
-              else
-                const PhotoPlaceholder(
-                  seed: 'up-preview',
-                  label: 'POULET',
-                  showLabel: true,
-                ),
-              const IgnorePointer(
-                child: DecoratedBox(
-                  decoration: BoxDecoration(
-                    gradient: LinearGradient(
-                      begin: Alignment.center,
-                      end: Alignment.bottomCenter,
-                      colors: [Colors.transparent, Color(0x66000000)],
+        child: GestureDetector(
+          onTap: isVideo ? _openVideoPlayer : null,
+          behavior: HitTestBehavior.opaque,
+          child: ClipRRect(
+            borderRadius: BorderRadius.circular(12),
+            child: Stack(
+              fit: StackFit.expand,
+              children: [
+                background,
+                const IgnorePointer(
+                  child: DecoratedBox(
+                    decoration: BoxDecoration(
+                      gradient: LinearGradient(
+                        begin: Alignment.center,
+                        end: Alignment.bottomCenter,
+                        colors: [Colors.transparent, Color(0x66000000)],
+                      ),
                     ),
                   ),
                 ),
+                if (isVideo)
+                  Center(
+                    child: Container(
+                      width: 32,
+                      height: 32,
+                      decoration: BoxDecoration(
+                        color: Colors.black.withValues(alpha: 0.55),
+                        shape: BoxShape.circle,
+                      ),
+                      alignment: Alignment.center,
+                      child: const Icon(Icons.play_arrow,
+                          size: 18, color: Colors.white),
+                    ),
+                  ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _VideoPreviewPage extends StatefulWidget {
+  final String filePath;
+  const _VideoPreviewPage({required this.filePath});
+
+  @override
+  State<_VideoPreviewPage> createState() => _VideoPreviewPageState();
+}
+
+class _VideoPreviewPageState extends State<_VideoPreviewPage> {
+  VideoPlayerController? _ctl;
+  bool _ready = false;
+  String? _error;
+
+  @override
+  void initState() {
+    super.initState();
+    _init();
+  }
+
+  Future<void> _init() async {
+    try {
+      final ctl = VideoPlayerController.file(File(widget.filePath));
+      await ctl.initialize();
+      await ctl.setLooping(true);
+      if (!mounted) {
+        await ctl.dispose();
+        return;
+      }
+      setState(() {
+        _ctl = ctl;
+        _ready = true;
+      });
+      await ctl.play();
+    } catch (e) {
+      if (!mounted) return;
+      setState(() => _error = e.toString());
+    }
+  }
+
+  @override
+  void dispose() {
+    _ctl?.dispose();
+    super.dispose();
+  }
+
+  void _togglePlay() {
+    final ctl = _ctl;
+    if (ctl == null || !ctl.value.isInitialized) return;
+    setState(() {
+      if (ctl.value.isPlaying) {
+        ctl.pause();
+      } else {
+        ctl.play();
+      }
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final ctl = _ctl;
+    return Scaffold(
+      backgroundColor: Colors.black,
+      body: SafeArea(
+        child: Stack(
+          children: [
+            Positioned.fill(
+              child: GestureDetector(
+                onTap: _togglePlay,
+                behavior: HitTestBehavior.opaque,
+                child: Center(
+                  child: _error != null
+                      ? Text(
+                          _error!,
+                          style: const TextStyle(color: Colors.white70),
+                          textAlign: TextAlign.center,
+                        )
+                      : (_ready && ctl != null
+                          ? AspectRatio(
+                              aspectRatio: ctl.value.aspectRatio == 0
+                                  ? 9 / 16
+                                  : ctl.value.aspectRatio,
+                              child: VideoPlayer(ctl),
+                            )
+                          : const CircularProgressIndicator(
+                              color: Colors.white)),
+                ),
               ),
-              if (kind == 'video')
-                Center(
+            ),
+            if (ctl != null && _ready && !ctl.value.isPlaying)
+              IgnorePointer(
+                child: Center(
                   child: Container(
-                    width: 28,
-                    height: 28,
+                    width: 64,
+                    height: 64,
                     decoration: BoxDecoration(
-                      color: Colors.black.withValues(alpha: 0.55),
+                      color: Colors.black.withValues(alpha: 0.45),
                       shape: BoxShape.circle,
                     ),
                     alignment: Alignment.center,
                     child: const Icon(Icons.play_arrow,
-                        size: 14, color: Colors.white),
+                        size: 36, color: Colors.white),
                   ),
                 ),
-            ],
-          ),
+              ),
+            Positioned(
+              top: 8,
+              right: 8,
+              child: IconButton(
+                onPressed: () => Navigator.of(context).maybePop(),
+                icon: const Icon(Icons.close, color: Colors.white),
+              ),
+            ),
+            if (ctl != null && _ready)
+              Positioned(
+                left: 16,
+                right: 16,
+                bottom: 24,
+                child: VideoProgressIndicator(
+                  ctl,
+                  allowScrubbing: true,
+                  colors: const VideoProgressColors(
+                    playedColor: Colors.white,
+                    bufferedColor: Color(0x44FFFFFF),
+                    backgroundColor: Color(0x22FFFFFF),
+                  ),
+                ),
+              ),
+          ],
         ),
       ),
     );
@@ -3359,81 +3475,3 @@ class _CaptionField extends StatelessWidget {
   }
 }
 
-class _ToggleRow extends StatelessWidget {
-  final String label;
-  final bool value;
-  final ValueChanged<bool> onChanged;
-  final BgPalette palette;
-  final bool withDivider;
-
-  const _ToggleRow({
-    required this.label,
-    required this.value,
-    required this.onChanged,
-    required this.palette,
-    this.withDivider = false,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    return Container(
-      padding: const EdgeInsets.symmetric(vertical: 12),
-      decoration: BoxDecoration(
-        border: withDivider
-            ? Border(bottom: BorderSide(color: palette.cardBorder))
-            : null,
-      ),
-      child: Row(
-        mainAxisAlignment: MainAxisAlignment.spaceBetween,
-        children: [
-          Text(
-            label,
-            style: BgFonts.body(
-              size: 13,
-              weight: FontWeight.w600,
-              color: palette.ink,
-            ),
-          ),
-          GestureDetector(
-            onTap: () => onChanged(!value),
-            behavior: HitTestBehavior.opaque,
-            child: AnimatedContainer(
-              duration: const Duration(milliseconds: 150),
-              width: 40,
-              height: 24,
-              decoration: BoxDecoration(
-                color: value
-                    ? palette.orange
-                    : const Color(0x2E785028),
-                borderRadius: BorderRadius.circular(999),
-              ),
-              child: AnimatedAlign(
-                duration: const Duration(milliseconds: 150),
-                alignment:
-                    value ? Alignment.centerRight : Alignment.centerLeft,
-                child: Padding(
-                  padding: const EdgeInsets.symmetric(horizontal: 2),
-                  child: Container(
-                    width: 20,
-                    height: 20,
-                    decoration: const BoxDecoration(
-                      color: Colors.white,
-                      shape: BoxShape.circle,
-                      boxShadow: [
-                        BoxShadow(
-                          color: Color(0x33000000),
-                          blurRadius: 3,
-                          offset: Offset(0, 1),
-                        ),
-                      ],
-                    ),
-                  ),
-                ),
-              ),
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-}

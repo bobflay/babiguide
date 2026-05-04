@@ -283,4 +283,46 @@ class L {
       pick('Ajouter un commentaire bienveillant…', 'Add a kind comment…');
   String get fypSend => pick('Envoyer', 'Send');
   String get fypReply => pick('Répondre', 'Reply');
+
+  // Place chat
+  String get chatTitle => pick('Demander au resto', 'Ask the place');
+  String get chatSubtitle =>
+      pick('Réponses générées par IA', 'AI-generated answers');
+  String get chatInputHint =>
+      pick('Posez votre question…', 'Ask anything…');
+  String get chatSend => pick('Envoyer', 'Send');
+  String get chatTyping => pick('En train de répondre…', 'Typing…');
+  String get chatRetry => pick('Réessayer', 'Retry');
+  String get chatClear => pick('Effacer la conversation', 'Clear conversation');
+  String get chatClearConfirm => pick(
+      'Effacer toute la conversation ?', 'Clear the entire conversation?');
+  String get chatClearConfirmBody => pick(
+        "Les messages de cette conversation seront définitivement supprimés.",
+        'All messages in this conversation will be permanently deleted.',
+      );
+  String get chatEmptyTitle =>
+      pick('Posez une question au resto', 'Ask the place anything');
+  String get chatEmptyBody => pick(
+      "Menu, allergies, horaires, ambiance — l'assistant connaît cet endroit.",
+      "Menu, allergies, hours, vibe — the assistant knows this place.");
+  String get chatRateLimited => pick(
+      'Vous allez un peu vite. Réessayez dans quelques secondes.',
+      'Slow down a bit — try again in a few seconds.');
+  String get chatUnavailable => pick(
+      "L'assistant est momentanément indisponible.",
+      'The assistant is temporarily unavailable.');
+  String chatTooLong(int max) => pick(
+      'Message trop long ($max max).',
+      'Message too long ($max max).');
+  List<String> get chatSuggestions => isFr
+      ? const [
+          'Avez-vous des plats végétariens ?',
+          'Vous êtes ouverts ce soir ?',
+          'Y a-t-il une terrasse ?',
+        ]
+      : const [
+          'Do you have vegetarian dishes?',
+          'Are you open tonight?',
+          'Is there a terrace?',
+        ];
 }
