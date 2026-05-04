@@ -12,6 +12,7 @@ import 'api/models.dart';
 import 'api/places_api.dart';
 import 'api/reviews_api.dart';
 import 'api/token_storage.dart';
+import 'services/geolocation.dart';
 import 'theme.dart';
 
 enum BgLang { fr, en }
@@ -110,6 +111,27 @@ class AppState extends ChangeNotifier {
     }
   }
 
+  /// Acquire the device's current position and POST it to `/me/location`.
+  /// No-op if not signed in or if the user has opted out via
+  /// `preferences.locationEnabled`. Best-effort: silently swallows
+  /// permission/network failures so it can be safely fire-and-forgotten.
+  Future<void> reportLocationIfSignedIn() async {
+    if (!isSignedIn) return;
+    if (_user?.preferences.locationEnabled == false) return;
+    final result = await acquireUserPosition();
+    final pos = result.position;
+    if (pos == null) return;
+    try {
+      await meApi.postLocation(
+        lat: pos.latitude,
+        lng: pos.longitude,
+        accuracyM: pos.accuracy,
+      );
+    } on ApiError {
+      // best-effort
+    }
+  }
+
   Future<void> refreshFavorites() async {
     if (!isSignedIn) return;
     try {
@@ -142,6 +164,7 @@ class AppState extends ChangeNotifier {
       notifyListeners();
       // Pull favorites in the background; don't block bootstrap.
       refreshFavorites();
+      reportLocationIfSignedIn();
     } on ApiError catch (e) {
       if (e.isUnauthorized) {
         await _tokens.clear();
@@ -161,6 +184,7 @@ class AppState extends ChangeNotifier {
     _applyServerPreferences(result.user);
     notifyListeners();
     refreshFavorites();
+    reportLocationIfSignedIn();
   }
 
   Future<void> markOnboardingDone() async {
