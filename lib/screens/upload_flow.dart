@@ -66,16 +66,34 @@ const List<int> _kDurations = [15, 30, 60];
 /// Ambiance). See `reviewSubKeys` in lib/constants.dart.
 const List<String> _kPublishSubKeys = ['food', 'staff', 'toilet', 'ambiance'];
 
+enum _UploadStatus { queued, uploading, success, failed }
+
+class _UploadItem {
+  XFile original;
+  XFile edited;
+  XFile? thumb;
+  final String kind;
+  _UploadStatus status;
+  MediaUploadResult? result;
+  String? errorMessage;
+
+  _UploadItem({
+    required this.original,
+    XFile? edited,
+    required this.kind,
+  })  : edited = edited ?? original,
+        thumb = null,
+        status = _UploadStatus.queued;
+}
+
 class _UploadFlowState extends State<UploadFlow> {
   int _step = 0;
   final Map<int, int> _stars = {0: 0, 1: 0, 2: 0, 3: 0};
   bool _publishing = false;
-  XFile? _picked; // The originally captured/picked file.
-  XFile? _edited; // The post-edit file we'll upload (baked photo or
-  //                same as _picked for video).
-  XFile? _editedThumb; // Optional cover frame for videos.
-  String _kind = 'photo';
+  final List<_UploadItem> _items = [];
   final TextEditingController _captionCtl = TextEditingController();
+
+  String get _kind => _items.isEmpty ? 'photo' : _items.first.kind;
 
   String get _draftKey => 'babiguide.upload_draft.${widget.placeSlug}';
 
@@ -129,28 +147,30 @@ class _UploadFlowState extends State<UploadFlow> {
     await prefs.remove(_draftKey);
   }
 
-  void _onCaptured(XFile file, String kind) {
-    if (!mounted) return;
+  void _onCaptured(List<XFile> files, String kind) {
+    if (!mounted || files.isEmpty) return;
     setState(() {
-      _picked = file;
-      _edited = file;
-      _kind = kind;
-      _step = 1;
+      _items
+        ..clear()
+        ..addAll(files.map((f) => _UploadItem(original: f, kind: kind)));
+      // Multi-photo selections skip the editor — there's no per-item edit
+      // UI. Single captures (camera photo, video, single library photo)
+      // still go through Edit.
+      _step = files.length > 1 ? 2 : 1;
     });
   }
 
   void _onEditDone(XFile editedFile, {XFile? thumb}) {
-    if (!mounted) return;
+    if (!mounted || _items.isEmpty) return;
     setState(() {
-      _edited = editedFile;
-      _editedThumb = thumb;
+      _items.first.edited = editedFile;
+      _items.first.thumb = thumb;
       _step = 2;
     });
   }
 
   Future<void> _publish() async {
-    final picked = _picked;
-    if (picked == null || _publishing) return;
+    if (_items.isEmpty || _publishing) return;
     final state = AppScope.of(context);
     final l = L(state.lang);
     if (!state.isSignedIn) {
@@ -162,25 +182,68 @@ class _UploadFlowState extends State<UploadFlow> {
       return;
     }
     setState(() => _publishing = true);
+    final caption = _captionCtl.text.trim();
+    final category =
+        widget.initialCategory == 'all' ? null : widget.initialCategory;
+
+    // Upload each item sequentially so the user sees one indicator turn
+    // green before the next starts. Failures are recorded per-item; we
+    // continue so a single bad file doesn't doom the rest.
+    for (final item in _items) {
+      if (item.status == _UploadStatus.success) continue;
+      if (!mounted) return;
+      setState(() {
+        item.status = _UploadStatus.uploading;
+        item.errorMessage = null;
+      });
+      try {
+        final media = await state.mediaApi.upload(
+          file: File(item.edited.path),
+          kind: item.kind,
+          placeId: widget.placeSlug,
+          category: category,
+          label: caption.isEmpty ? null : caption,
+          thumb: item.thumb == null ? null : File(item.thumb!.path),
+        );
+        if (!mounted) return;
+        setState(() {
+          item.result = media;
+          item.status = _UploadStatus.success;
+        });
+      } on ApiError catch (e) {
+        if (!mounted) return;
+        setState(() {
+          item.status = _UploadStatus.failed;
+          item.errorMessage = e.message;
+        });
+      } catch (_) {
+        if (!mounted) return;
+        setState(() {
+          item.status = _UploadStatus.failed;
+          item.errorMessage = l.photoUploadFailed;
+        });
+      }
+    }
+
+    final uploaded = _items
+        .where((i) => i.status == _UploadStatus.success && i.result != null)
+        .toList();
+    if (uploaded.isEmpty) {
+      if (!mounted) return;
+      setState(() => _publishing = false);
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+        content: Text(l.photoUploadFailed),
+        behavior: SnackBarBehavior.floating,
+      ));
+      return;
+    }
+
+    final subs = <String, int>{
+      for (final e in _stars.entries)
+        if (e.value > 0 && e.key < _kPublishSubKeys.length)
+          _kPublishSubKeys[e.key]: e.value,
+    };
     try {
-      final thumb = _editedThumb;
-      final caption = _captionCtl.text.trim();
-      final media = await state.mediaApi.upload(
-        file: File(picked.path),
-        kind: _kind,
-        placeId: widget.placeSlug,
-        category: widget.initialCategory == 'all' ? null : widget.initialCategory,
-        label: caption.isEmpty ? null : caption,
-        thumb: thumb == null ? null : File(thumb.path),
-      );
-      // Submit a review whenever the user gave at least one sub-rating.
-      // Otherwise treat this as a media-only upload so the user can post
-      // a video without grading the place.
-      final subs = <String, int>{
-        for (final e in _stars.entries)
-          if (e.value > 0 && e.key < _kPublishSubKeys.length)
-            _kPublishSubKeys[e.key]: e.value,
-      };
       if (subs.isNotEmpty) {
         final overall = (subs.values.reduce((a, b) => a + b) / subs.length)
             .round()
@@ -188,15 +251,15 @@ class _UploadFlowState extends State<UploadFlow> {
         await state.reviewsApi.postReview(
           widget.placeSlug,
           rating: overall,
-          text: _captionCtl.text.trim(),
+          text: caption,
           sub: subs,
           tags: const [],
-          mediaIds: [media.id],
+          mediaIds: uploaded.map((i) => i.result!.id).toList(),
         );
       }
       await _clearDraft();
       if (!mounted) return;
-      Navigator.of(context).pop<MediaUploadResult>(media);
+      Navigator.of(context).pop<MediaUploadResult>(uploaded.first.result);
     } on ApiError catch (e) {
       if (!mounted) return;
       setState(() => _publishing = false);
@@ -239,23 +302,22 @@ class _UploadFlowState extends State<UploadFlow> {
             onCaptured: _onCaptured,
           ),
         1 => _EditStep(
-            picked: _picked,
+            picked: _items.isEmpty ? null : _items.first.original,
             kind: _kind,
             onBack: () => setState(() => _step = 0),
             onDone: _onEditDone,
           ),
         _ => _PublishStep(
             captionCtl: _captionCtl,
-            picked: _edited ?? _picked,
-            thumb: _editedThumb,
-            kind: _kind,
+            items: _items,
             placeName: widget.placeName,
             placeNeighborhood: widget.placeNeighborhood,
             placePhotoUrl: widget.placePhotoUrl,
             stars: _stars,
             publishing: _publishing,
             onStarChanged: (cat, n) => setState(() => _stars[cat] = n),
-            onBack: () => setState(() => _step = 1),
+            // Multi-photo flows skip the editor; back returns to capture.
+            onBack: () => setState(() => _step = _items.length > 1 ? 0 : 1),
             onPublish: _publish,
             onSaveDraft: _saveDraftAndExit,
           ),
@@ -273,7 +335,7 @@ class _CaptureStep extends StatefulWidget {
   final String? placeNeighborhood;
   final String? placePhotoUrl;
   final VoidCallback onCancel;
-  final void Function(XFile file, String kind) onCaptured;
+  final void Function(List<XFile> files, String kind) onCaptured;
 
   const _CaptureStep({
     required this.placeName,
@@ -294,7 +356,7 @@ class _CaptureStepState extends State<_CaptureStep>
   int _cameraIdx = 0;
   FlashMode _flashMode = FlashMode.off;
   bool _gridOn = true;
-  // 0 = Photo, 1 = Video. Live (idx 2) is rendered but disabled.
+  // 0 = Photo, 1 = Video.
   int _modeIdx = 1;
   int _durationIdx = 1;
   bool _initializing = true;
@@ -442,7 +504,7 @@ class _CaptureStepState extends State<_CaptureStep>
       try {
         final file = await c.takePicture();
         if (!mounted) return;
-        widget.onCaptured(file, 'photo');
+        widget.onCaptured([file], 'photo');
       } on CameraException catch (e) {
         _showError(e.description ?? e.code);
       } finally {
@@ -456,7 +518,6 @@ class _CaptureStepState extends State<_CaptureStep>
         await _stopRecording();
       }
     }
-    // _modeIdx == 2 (Live) — disabled, no-op.
   }
 
   Future<void> _startRecording() async {
@@ -491,7 +552,7 @@ class _CaptureStepState extends State<_CaptureStep>
       final file = await c.stopVideoRecording();
       if (!mounted) return;
       setState(() => _isRecording = false);
-      widget.onCaptured(file, 'video');
+      widget.onCaptured([file], 'video');
     } on CameraException catch (e) {
       if (mounted) setState(() => _isRecording = false);
       _showError(e.description ?? e.code);
@@ -502,17 +563,17 @@ class _CaptureStepState extends State<_CaptureStep>
     if (_isRecording) return;
     final fallbackMsg = L(AppScope.of(context).lang).photoUploadFailed;
     try {
-      XFile? picked;
       if (_modeIdx == 1) {
-        picked = await _picker.pickVideo(source: ImageSource.gallery);
-        if (picked != null && mounted) widget.onCaptured(picked, 'video');
+        final picked = await _picker.pickVideo(source: ImageSource.gallery);
+        if (picked != null && mounted) widget.onCaptured([picked], 'video');
       } else {
-        picked = await _picker.pickImage(
-          source: ImageSource.gallery,
+        final picked = await _picker.pickMultiImage(
           imageQuality: 85,
           maxWidth: 2048,
         );
-        if (picked != null && mounted) widget.onCaptured(picked, 'photo');
+        if (picked.isNotEmpty && mounted) {
+          widget.onCaptured(picked, 'photo');
+        }
       }
     } catch (_) {
       _showError(fallbackMsg);
@@ -556,7 +617,6 @@ class _CaptureStepState extends State<_CaptureStep>
     final modes = [
       l.pick('Photo', 'Photo'),
       l.pick('Vidéo', 'Video'),
-      l.pick('Live', 'Live'),
     ];
     final cap = _kDurations[_durationIdx];
     final progress = _isRecording
@@ -746,7 +806,7 @@ class _CaptureStepState extends State<_CaptureStep>
                 ],
               ),
             ),
-            // Mode pills (Photo / Video / Live).
+            // Mode pills (Photo / Video).
             Positioned(
               bottom: 168,
               left: 0,
@@ -756,7 +816,7 @@ class _CaptureStepState extends State<_CaptureStep>
                 children: [
                   for (var i = 0; i < modes.length; i++) ...[
                     GestureDetector(
-                      onTap: i == 2 || _isRecording
+                      onTap: _isRecording
                           ? null
                           : () => setState(() => _modeIdx = i),
                       behavior: HitTestBehavior.opaque,
@@ -775,16 +835,13 @@ class _CaptureStepState extends State<_CaptureStep>
                                   size: 12,
                                   weight: FontWeight.w700,
                                   letterSpacing: 0.4,
-                                  color: i == 2
-                                      ? Colors.white.withValues(alpha: 0.35)
-                                      : (_modeIdx == i
-                                          ? Colors.white
-                                          : Colors.white
-                                              .withValues(alpha: 0.55)),
+                                  color: _modeIdx == i
+                                      ? Colors.white
+                                      : Colors.white.withValues(alpha: 0.55),
                                 ),
                               ),
                             ),
-                            if (_modeIdx == i && i != 2)
+                            if (_modeIdx == i)
                               const Positioned(
                                 bottom: -4,
                                 child: _OrangeDot(),
@@ -2717,9 +2774,7 @@ class _StickerPicker extends StatelessWidget {
 
 class _PublishStep extends StatelessWidget {
   final TextEditingController captionCtl;
-  final XFile? picked;
-  final XFile? thumb;
-  final String kind;
+  final List<_UploadItem> items;
   final String? placeName;
   final String? placeNeighborhood;
   final String? placePhotoUrl;
@@ -2732,9 +2787,7 @@ class _PublishStep extends StatelessWidget {
 
   const _PublishStep({
     required this.captionCtl,
-    required this.picked,
-    required this.thumb,
-    required this.kind,
+    required this.items,
     required this.placeName,
     required this.placeNeighborhood,
     required this.placePhotoUrl,
@@ -2754,6 +2807,7 @@ class _PublishStep extends StatelessWidget {
     final cats = l.isFr
         ? const ['Plats', 'Service', 'Toilettes', 'Ambiance']
         : const ['Food', 'Service', 'Toilets', 'Ambiance'];
+    final isMulti = items.length > 1;
     return Material(
       color: p.bg,
       child: SafeArea(
@@ -2769,37 +2823,66 @@ class _PublishStep extends StatelessWidget {
               onBack: publishing ? null : onBack,
               onPublish: publishing ? null : onPublish,
             ),
-            // Preview + caption row.
-            Padding(
-              padding: const EdgeInsets.fromLTRB(16, 6, 16, 0),
-              child: Row(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  _PublishPreview(picked: picked, thumb: thumb, kind: kind),
-                  const SizedBox(width: 12),
-                  Expanded(
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        _SectionLabel(
-                          text: l.pick('Légende', 'Caption'),
-                          palette: p,
-                        ),
-                        const SizedBox(height: 6),
-                        _CaptionField(
-                          controller: captionCtl,
-                          palette: p,
-                          hint: l.pick(
-                            'Décrivez votre expérience…',
-                            'Describe your experience…',
-                          ),
-                        ),
-                      ],
+            // Preview + caption.
+            if (isMulti) ...[
+              _MediaStrip(items: items, palette: p),
+              Padding(
+                padding: const EdgeInsets.fromLTRB(16, 14, 16, 0),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    _SectionLabel(
+                      text: l.pick('Légende', 'Caption'),
+                      palette: p,
                     ),
-                  ),
-                ],
+                    const SizedBox(height: 6),
+                    _CaptionField(
+                      controller: captionCtl,
+                      palette: p,
+                      hint: l.pick(
+                        'Décrivez votre expérience…',
+                        'Describe your experience…',
+                      ),
+                    ),
+                  ],
+                ),
               ),
-            ),
+            ] else
+              Padding(
+                padding: const EdgeInsets.fromLTRB(16, 6, 16, 0),
+                child: Row(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    _PublishPreview(
+                      picked: items.isEmpty ? null : items.first.edited,
+                      thumb: items.isEmpty ? null : items.first.thumb,
+                      kind: items.isEmpty ? 'photo' : items.first.kind,
+                      status: items.isEmpty ? null : items.first.status,
+                    ),
+                    const SizedBox(width: 12),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          _SectionLabel(
+                            text: l.pick('Légende', 'Caption'),
+                            palette: p,
+                          ),
+                          const SizedBox(height: 6),
+                          _CaptionField(
+                            controller: captionCtl,
+                            palette: p,
+                            hint: l.pick(
+                              'Décrivez votre expérience…',
+                              'Describe your experience…',
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ],
+                ),
+              ),
             // Place tag.
             Padding(
               padding: const EdgeInsets.fromLTRB(16, 20, 16, 0),
@@ -3132,10 +3215,12 @@ class _PublishPreview extends StatefulWidget {
   final XFile? picked;
   final XFile? thumb;
   final String kind;
+  final _UploadStatus? status;
   const _PublishPreview({
     required this.picked,
     required this.thumb,
     required this.kind,
+    this.status,
   });
 
   @override
@@ -3267,6 +3352,13 @@ class _PublishPreviewState extends State<_PublishPreview> {
                       child: const Icon(Icons.play_arrow,
                           size: 18, color: Colors.white),
                     ),
+                  ),
+                if (widget.status != null &&
+                    widget.status != _UploadStatus.queued)
+                  Positioned(
+                    top: 6,
+                    right: 6,
+                    child: _StatusBadge(status: widget.status!),
                   ),
               ],
             ),
@@ -3475,3 +3567,135 @@ class _CaptionField extends StatelessWidget {
   }
 }
 
+/// Small circular badge overlaid on a photo thumb that reflects its
+/// upload progress (uploading / success / failed). Queued items render
+/// without a badge to avoid visual noise before publish is tapped.
+class _StatusBadge extends StatelessWidget {
+  final _UploadStatus status;
+  const _StatusBadge({required this.status});
+
+  @override
+  Widget build(BuildContext context) {
+    Color bg;
+    Widget child;
+    switch (status) {
+      case _UploadStatus.uploading:
+        bg = Colors.black.withValues(alpha: 0.6);
+        child = const SizedBox(
+          width: 12,
+          height: 12,
+          child: CircularProgressIndicator(
+            strokeWidth: 2,
+            valueColor: AlwaysStoppedAnimation<Color>(Colors.white),
+          ),
+        );
+        break;
+      case _UploadStatus.success:
+        bg = const Color(0xFF1FAE60);
+        child = const Icon(Icons.check, size: 14, color: Colors.white);
+        break;
+      case _UploadStatus.failed:
+        bg = const Color(0xFFD83A3A);
+        child = const Icon(Icons.priority_high, size: 14, color: Colors.white);
+        break;
+      case _UploadStatus.queued:
+        bg = Colors.black.withValues(alpha: 0.5);
+        child = const Icon(Icons.schedule, size: 12, color: Colors.white);
+        break;
+    }
+    return Container(
+      width: 22,
+      height: 22,
+      decoration: BoxDecoration(color: bg, shape: BoxShape.circle),
+      alignment: Alignment.center,
+      child: child,
+    );
+  }
+}
+
+/// Horizontal strip of selected-media thumbnails shown above the caption
+/// when the user picked more than one photo. Each cell carries a status
+/// badge so the user can watch uploads tick off one at a time.
+class _MediaStrip extends StatelessWidget {
+  final List<_UploadItem> items;
+  final BgPalette palette;
+  const _MediaStrip({required this.items, required this.palette});
+
+  @override
+  Widget build(BuildContext context) {
+    final l = L(AppScope.of(context).lang);
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(16, 6, 16, 0),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              _SectionLabel(
+                text: l.pick(
+                    '${items.length} photos sélectionnées',
+                    '${items.length} photos selected'),
+                palette: palette,
+              ),
+            ],
+          ),
+          const SizedBox(height: 8),
+          SizedBox(
+            height: 96,
+            child: ListView.separated(
+              scrollDirection: Axis.horizontal,
+              itemCount: items.length,
+              separatorBuilder: (_, _) => const SizedBox(width: 8),
+              itemBuilder: (_, i) => _MediaStripCell(item: items[i]),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _MediaStripCell extends StatelessWidget {
+  final _UploadItem item;
+  const _MediaStripCell({required this.item});
+
+  @override
+  Widget build(BuildContext context) {
+    return SizedBox(
+      width: 72,
+      height: 96,
+      child: ClipRRect(
+        borderRadius: BorderRadius.circular(10),
+        child: Stack(
+          fit: StackFit.expand,
+          children: [
+            Image.file(
+              File(item.edited.path),
+              fit: BoxFit.cover,
+              errorBuilder: (_, _, _) => const ColoredBox(
+                color: Color(0xFF1A1209),
+              ),
+            ),
+            if (item.status != _UploadStatus.queued)
+              const IgnorePointer(
+                child: DecoratedBox(
+                  decoration: BoxDecoration(
+                    gradient: LinearGradient(
+                      begin: Alignment.topRight,
+                      end: Alignment.bottomLeft,
+                      colors: [Color(0x55000000), Colors.transparent],
+                    ),
+                  ),
+                ),
+              ),
+            Positioned(
+              top: 4,
+              right: 4,
+              child: _StatusBadge(status: item.status),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
